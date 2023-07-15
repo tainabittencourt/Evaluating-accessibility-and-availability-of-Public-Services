@@ -1,0 +1,3800 @@
+---
+title: "GIM"
+output: 
+  html_document: 
+    fig_height: 7
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+options(java.parameters = "-Xmx20G")
+Sys.setenv(JAVA_HOME="D:/Program Files/jdk-11")
+
+library(checkpoint)
+library(tidyverse)
+library(knitr)
+library(sf)
+library(sp)
+library(raster)
+library(spdep)
+library(purrr)
+library(lme4)
+library(jtools)
+library(merTools)
+library(spgwr)
+library(interflex)
+library(stargazer)
+library(devtools)
+library(tidyr)
+library(expss)
+library(MatchIt)
+library(broom)
+library(rgenoud)
+library(nngeo)
+library(ineq)
+library(lctools)
+library(DescTools)
+library(fs)
+library(stringr)
+#library(dbplyr)
+library(matrixStats)
+library(seg)
+library(acid)
+library(reldist)
+library(dineq)
+library(laeken)
+library(RColorBrewer)
+library(hrbrthemes)
+library(ggmap)
+library(gridExtra)
+library(osmdata)
+library(viridis)
+library(foreign)
+library(weights)
+library(splitstackshape)
+library(ergm)
+library(cowplot)
+library(rgdal)
+library(matchingR)
+library(rlist)
+library(lpSolve)
+library(geosphere)
+library(link2GI)
+#library(nnetpredint)
+library(rgeos)
+library(rgrass7)
+library(shp2graph)
+library(reshape2)
+library(biscale)
+library(SpatialPosition)
+library(rJava)
+library(Hmisc)
+#library(osmar)
+library(tidygraph)
+library(igraph)
+library(r5r)
+library(elevatr)
+library(leaflet)
+library(reticulate)
+library(read.dbc)
+library(ggnewscale)
+library(janitor)
+library(rmapshaper)
+library(DescTools)
+library(Hmisc)
+library(corrplot)
+library(GGally)
+
+#py_install("pandas")
+#py_install("libpysal")
+#py_install("segregation")
+#py_install("matplotlib.pyplot")
+#py_install("geopandas")
+#py_install("fiona")
+#py_install("GDAL")
+
+mutate <- dplyr::mutate
+select <- dplyr::select
+filter <- dplyr::filter
+rename <- dplyr::rename
+distinct <- dplyr::distinct
+pull <- dplyr::pull
+summarize <- dplyr::summarize
+nest <- tidyr::nest
+
+sf::sf_use_s2(FALSE)
+
+weighted.ttest.ci <- function(x, weights, conf.level = 0.95) {
+  a <- tibble(x,weights) %>% na.omit() %>%
+    filter(is.finite(x)) %>% filter(is.finite(weights))
+  x <- a$x
+  weights <- a$weights
+  nx <- length(x)
+  df <- nx - 1
+  vx <- Hmisc::wtd.var(x, weights, normwt = TRUE) ## From Hmisc
+  mx <- weighted.mean(x, weights)
+  stderr <- sqrt(vx/nx)
+  tstat <- mx/stderr ## not mx - mu
+  alpha <- 1 - conf.level
+  cint <- qt(1 - alpha/2, df)
+  cint <- tstat + c(-cint, cint)
+  c(cint * stderr,mx)
+}
+
+is_outlier <- function(x) {
+  return(x < quantile(x, 0.25) - 1.5 * IQR(x) | x > quantile(x, 0.75) + 1.5 * IQR(x))
+}
+
+diffRound <- function(x) { 
+  diff(c(0, round(cumsum(x)))) 
+}
+
+#install.packages("basedosdados")
+#library("basedosdados")
+
+# Defina o seu projeto no Google Cloud
+#set_billing_id("base-dos-dados-370619")
+
+#query <- "SELECT * FROM `basedosdados.br_ms_cnes.estabelecimento`"
+#dir <- tempdir()
+#data <- download(query, path = "H:/Meu Drive/Doc/Analysis/OBT/CNES/dados.csv")
+
+# Para carregar o dado direto no R
+#query <- bdplyr("br_ms_sim.municipio_causa_idade")
+#df <- bd_collect(query)
+
+
+```
+
+# São Paulo
+
+```{r maps_functions_sp}
+
+  mun <- st_read(paste0("Inputs/Map_Elements/sp_mun_MR.shp"))
+  mun_city <- st_read(paste0("Inputs/Map_Elements/sp_mun.shp"))
+  transport <- st_read(paste0("Inputs/Map_Elements/sp_transport_axes.shp"))
+  mask <- st_read(paste0("Inputs/Land_Cover/Shapefiles/sp_cover_MR.shp"))
+  back <- st_read("Inputs/Map_Elements/br_mun.shp")
+
+# Base theme map
+theme_map <- function(...){
+  theme(
+    axis.line = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "#f0f0f0", color = NA),
+    plot.title = element_blank(),
+    plot.subtitle = element_blank(),
+    legend.title = element_text(size = 12, color = "#4e4d47",family="Helvetica"),
+    legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47",family="Helvetica"),
+    legend.background = element_rect(fill = alpha('white', 0.5)),
+    #legend.key = element_rect(color = NA, fill = NA),
+    legend.key.size = unit(12, "cm"),
+    ...)}
+
+# Map for numeric variables
+
+PlotMap <- function(base,variable,name_var) {
+  
+  
+  zoom_x <- c(-46.85,-46.35)
+  zoom_y <- c(-23.9,-23.4)
+  bar_scale <- 7.5
+  pos_legend <- c(0.75,0.25)
+  
+  #breaks <- c(0,5,10,15,20,25,30,1000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]," min."),"> 30 min.")
+  
+  #breaks <- c(0,100,250,500,750,1000,2500,5000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]),"> 2500")
+  
+  #breaks <- c(0,100,500,1000,2500,5000,10000,1000000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]),"> 10000")
+  
+  breaks <- c(0,0.1,0.25,0.5,0.75,1,2.5,50000)
+  base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  breaks_scale <- levels(base$breaks) %>% as.numeric()
+  labels <- c(paste0(breaks[2:7]),"> 2.5")
+  
+  #breaks <- c(0,1000,2500,5000,7500,10000,25000,500000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]),"> 25000")
+  
+  #breaks=c(0,50,5000,20000,40000,80000,100000,10000000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]," m²"),"> 100,000 m²")
+  
+  #breaks=c(0,200,400,600,1000,1800,2400,3000,10000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:9])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- breaks[2:9]
+  
+  #breaks=c(0,0.001,0.005,0.01,0.05,0.1,0.2,10)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7],"m²/inhab."),"> 0.2 m²/inhab.")
+  
+  # Plot map
+  map <- ggplot() +
+    geom_sf(data = back %>% filter(DN == "0"), mapping = aes(), fill = "#f0f0f0", size = 0.3, color = "white") +
+    theme_map() +
+    theme(legend.position = pos_legend) + 
+    #geom_sf(data = hex,mapping=aes(),fill = "#C5C5C5",color = NA) +
+    geom_sf(data = base, aes(fill = breaks), color = NA)  +
+    scale_fill_manual(
+      values = rev(cols),
+      breaks = rev(breaks_scale),
+      name = name_var,
+      drop = FALSE,
+      labels = rev(labels),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    geom_sf(data = mask %>% filter(DN != 3), mapping = aes(), fill = "white", color = NA) +
+    geom_sf(data = mun_city %>% summarise(), mapping = aes(), fill = "transparent", color = "white", size = 0.7) +
+    geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.5,linetype = "dashed") +
+    coord_sf(xlim=zoom_x,ylim=zoom_y) +
+    ggsn::scalebar(data = mun_city, dist = bar_scale, st.color = "#4e4d47", st.size=2, box.fill = c("#4e4d47","#f0f0f0"), box.color = "#4e4d47", border.size = 0.2, height=0.015, dist_unit = "km", location = "bottomright", model = 'WGS84',transform = TRUE, anchor = c(x=zoom_x[2], y=zoom_y[1])) +
+    ggsn::north(data = mun_city, location = "topright", scale = 0.1, symbol = 6, anchor = c(x=zoom_x[2], y=zoom_y[2]))
+  
+  return(map)
+}
+
+PlotMap3 <- function(base,variable,name_var,variable2,name_var2) {
+  
+  
+  zoom_x <- c(-46.85,-46.35)
+  zoom_y <- c(-23.9,-23.4)
+  bar_scale <- 7.5
+  pos_legend <- c(0.75,0.25)
+  
+  breaks <- c(0,5,10,15,20,25,30,1000)
+  #breaks <- c(0,10,20,30,40,50,60,10000)
+  base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  breaks_scale <- levels(base$breaks) %>% as.numeric()
+  labels <- c(paste0(breaks[2:7]," min."),"> 30 min.")
+  
+  breaks2 <- c(0,10,50,100,200,400,600,1000000)
+  base$breaks2 <- cut(variable2,breaks = breaks2,include.lowest = TRUE,labels = breaks2[2:8])
+  breaks_scale2 <- levels(base$breaks2) %>% as.numeric()
+  labels2 <- c(paste0(breaks2[2:7]," people"),"> 600 people")
+  
+  # Plot map
+  map <- ggplot() +
+    geom_sf(data = back %>% filter(DN == "0"), mapping = aes(), fill = "#f0f0f0", size = 0.3, color = "white") +
+    theme_map() +
+    theme(legend.position = pos_legend) + 
+    #geom_sf(data = hex,mapping=aes(),fill = "#C5C5C5",color = NA) +
+    
+    geom_sf(data = base, aes(fill = breaks), color = NA)  +
+    scale_fill_manual(
+      values = cols,
+      breaks = rev(breaks_scale),
+      name = name_var,
+      drop = FALSE,
+      labels = rev(labels),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    new_scale_fill() +
+    
+    geom_sf(data=base, aes(fill = breaks2,alpha = breaks2),color=NA) +
+    
+    scale_fill_manual(
+      values = cols2,
+      breaks = rev(breaks_scale2),
+      name = name_var2,
+      drop = FALSE,
+      labels = rev(labels2),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    scale_alpha_manual(
+      values = c(0,0.2,0.4,0.8,0.8,1,1),
+      guide='none') +
+    
+    geom_sf(data = mask %>% filter(DN != 3), mapping = aes(), fill = "white", color = NA) +
+    geom_sf(data = mun_city %>% summarise(), mapping = aes(), fill = "transparent", color = "white", size = 0.7) +
+    geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.5,linetype = "dashed") +
+    coord_sf(xlim=zoom_x,ylim=zoom_y) +
+    ggsn::scalebar(data = mun_city, dist = bar_scale, st.color = "#4e4d47", st.size=2, box.fill = c("#4e4d47","#f0f0f0"), box.color = "#4e4d47", border.size = 0.2, height=0.015, dist_unit = "km", location = "bottomleft", model = 'WGS84',transform = TRUE, anchor = c(x=zoom_x[1], y=zoom_y[1])) +
+    ggsn::north(data = mun_city, location = "topright", scale = 0.1, symbol = 6, anchor = c(x=zoom_x[2], y=zoom_y[2]))
+  
+  return(map)
+}
+
+PlotMap2 <- function(base,variable,name_var,variable2,name_var2,equip) {
+  
+  bar_scale <- 7.5
+  
+  breaks <- c(0,5,10,15,20,25,30,10000)
+  #breaks <- c(0,10,20,30,40,50,60,1000)
+  base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  breaks_scale <- levels(base$breaks) %>% as.numeric()
+  labels <- c(paste0(breaks[2:7]," min."),"> 30 min.")
+  
+  breaks2 <- c(0,10,50,100,200,400,600,100000)
+  base$breaks2 <- cut(variable2,breaks = breaks2,include.lowest = TRUE,labels = breaks2[2:8])
+  breaks_scale2 <- levels(base$breaks2) %>% as.numeric()
+  labels2 <- c(paste0(breaks2[2:7]," people"),"> 600 people")
+  
+  # Plot map
+  map <- ggplot() +
+    geom_sf(data = back %>% filter(DN == "0"), mapping = aes(), fill = "#f0f0f0", size = 0.3, color = "white") +
+    theme_map() +
+    theme(legend.position = pos_legend) + 
+    #geom_sf(data = hex,mapping=aes(),fill = "#C5C5C5",color = NA) +
+    
+    geom_sf(data = base, aes(fill = breaks), color = NA)  +
+    scale_fill_manual(
+      values = cols,
+      breaks = rev(breaks_scale),
+      name = name_var,
+      drop = FALSE,
+      labels = rev(labels),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    new_scale_fill() +
+    
+    geom_sf(data=base, aes(fill = breaks2,alpha = breaks2),color=NA) +
+    
+    scale_fill_manual(
+      values = cols2,
+      breaks = rev(breaks_scale2),
+      name = name_var2,
+      drop = FALSE,
+      labels = rev(labels2),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    scale_alpha_manual(
+      values = c(0,0.2,0.4,0.8,0.8,1,1),
+      guide='none') +
+    
+    geom_sf(data = mask %>% filter(DN != 3), mapping = aes(), fill = "white", color = NA) +
+    
+    geom_sf(data=equip,aes(size = QT_MAT_FUND_AI, color = category)) +
+    
+    scale_color_manual(values = c("#51E18D","#0F572D"),
+                       name = "Schools",
+                       guide = guide_legend(
+                         #direction = "vertical",
+                         keyheight = unit(3, units = "mm"),
+                         keywidth = unit(7, units = "mm"),
+                         title.position = 'top',
+                         #title.hjust = 0.5,
+                         #label.hjust = 1,
+                         #nrow = 1,
+                         #byrow = T,
+                         reverse = T,
+                         label.position = "right")) +
+    
+    scale_size_continuous(range = c(0,3),
+                          name = "School seats",
+                          guide = guide_legend(
+                         #direction = "vertical",
+                         keyheight = unit(3, units = "mm"),
+                         keywidth = unit(7, units = "mm"),
+                         title.position = 'top',
+                         #title.hjust = 0.5,
+                         #label.hjust = 1,
+                         #nrow = 1,
+                         #byrow = T,
+                         reverse = T,
+                         label.position = "right")) +
+    
+    geom_sf(data = mun_city %>% summarise(), mapping = aes(), fill = "transparent", color = "white", size = 0.7) +
+    geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.5,linetype = "dashed") +
+    coord_sf(xlim=zoom_x,ylim=zoom_y) 
+  
+  return(map)
+}
+
+```
+
+```{r census_data_sp}
+
+grid <- st_read("OBT/sp_grid500.shp") %>% st_transform(4326)
+
+# Get census data
+sc_classes <- readRDS("Cities/Sao Paulo/sp_soc_sc.rds") %>%
+  mutate_all(as.character) %>% mutate_all(as.numeric) %>%
+  mutate_all(.,~(replace_na(.,0))) %>%
+  mutate(hi_wh = white1+white2,
+         md_wh = white3+white4+white5+white6+white7,
+         lo_wh = white8+white9,
+         hi_bl = black1+black2,
+         md_bl = black3+black4+black5+black6+black7,
+         lo_bl = black8+black9,
+         hi_ot = other1+other2,
+         md_ot = other3+other4+other5+other6+other7,
+         lo_ot = other8+other9) %>%
+  filter(substr(CD_GEOCODI,1,7) == "3550308") %>%
+  select(CD_GEOCODI,hi_wh,hi_bl,hi_ot,md_wh,md_bl,md_ot,lo_wh,lo_bl,lo_ot) %>%
+  mutate(CD_GEOCODI=as.character(CD_GEOCODI))
+
+sc_data <- read_csv("Inputs/Census_Universe/SP/CSV/Pessoa13_SP.csv") %>%
+  filter(substr(Cod_setor,1,7) == "3550308") %>%
+  mutate_all(.,~na_if(.,"X")) %>%
+  mutate_all(as.numeric) %>%
+  mutate(children_EF1 = V040+V041+V042+V043+V044,
+         children_EF2 = V045+V046+V047+V048,
+         young_EM = V049+V050+V051,
+         pop = V001) %>%
+  select(Cod_setor,children_EF1,children_EF2,young_EM,pop) %>%
+  left_join(read_csv2("Inputs/Census_Universe/SP/CSV/Basico_SP.csv",locale=locale(encoding="latin1")) %>%
+              filter(substr(Cod_setor,1,7) == "3550308")  %>%
+              mutate_all(.,~na_if(.,"X")) %>%
+              mutate_all(as.numeric) %>%
+              mutate(income = V009) %>%
+              select(Cod_setor,income),by="Cod_setor") %>%
+  rename(CD_GEOCODI = "Cod_setor") %>%
+  mutate(CD_GEOCODI = as.character(CD_GEOCODI)) %>%
+  left_join(sc_classes,by="CD_GEOCODI")
+
+# Reapportion
+inter <- st_read("OBT/sp_intersection_sc_grid500.shp") %>%
+  st_drop_geometry() %>%
+  left_join(sc_data,by="CD_GEOCODI") %>%
+  group_by(CD_GEOCODI) %>%
+    mutate(area_ct = sum(area)) %>%
+    ungroup() %>%
+    mutate(prop_area = area/area_ct) %>%
+    mutate_at(c("children_EF1","children_EF2","young_EM","pop","hi_wh","hi_bl","hi_ot","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot"),
+              ~(p=.*prop_area)) %>%
+    select(id_2,pop,income,children_EF1,children_EF2,young_EM,hi_wh,hi_bl,hi_ot,md_wh,md_bl,md_ot,lo_wh,lo_bl,lo_ot) %>%
+    mutate(income = as.numeric(as.character(income))) %>%
+    group_by(id_2) %>%
+    mutate(income = income*pop) %>%
+    summarise_all(.,~(p=sum(.,na.rm = T))) %>%
+    mutate(income = income/pop) %>%
+  rename(id = "id_2")
+
+grid <- grid %>% left_join(inter,by="id")
+grid[is.na(grid)] = 0
+
+grid %>% saveRDS("OBT/sp_grid_data500.rds")
+grid %>% st_write("OBT/sp_grid_data500.shp",delete_layer=T)
+
+grid <- grid %>%
+  mutate(upper = hi_wh+hi_bl+hi_ot,
+         middle = md_wh+md_bl+md_ot,
+         lower = lo_wh+lo_bl+lo_ot) %>%
+  mutate(child_EF1_public = sum(middle+lower)*(children_EF1/sum(upper+middle+lower)),
+         child_EF1_private = sum(upper)*(children_EF1/sum(upper+middle+lower))) %>%
+  mutate(pop_public = sum(middle+lower)*(pop/sum(upper+middle+lower)),
+         pop_private = sum(upper)*(pop/sum(upper+middle+lower))) %>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id)
+
+sum(grid$upper,na.rm=T)/sum(grid$upper+grid$middle+grid$lower,na.rm=T)
+sum(grid$lower,na.rm=T)/sum(grid$upper+grid$middle+grid$lower,na.rm=T)
+sum(grid$middle,na.rm=T)/sum(grid$upper+grid$middle+grid$lower,na.rm=T)
+
+box <- st_bbox(grid)
+cols <- c(rev(brewer.pal(7, "OrRd")))
+cols2 <- c(rev(brewer.pal(7,"BuPu")))
+  
+```
+
+```{r social_maps}
+
+cols <- magma(10)[2:9]
+
+name_var <- "White lower and middle class"
+plot <- PlotMap(grid,grid$md_wh+grid$lo_wh,name_var)
+plot
+ggsave("sp_wh_md_lo.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+
+name_var <- "Black lower and middle class"
+plot <- PlotMap(grid,grid$md_bl+grid$lo_bl,name_var)
+plot
+ggsave("sp_bl_md_lo.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+name_var <- "Upper class"
+plot <- PlotMap(grid,grid$hi_wh+grid$hi_bl,name_var)
+plot
+ggsave("sp_hi.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+name_var <- "Lower class"
+plot <- PlotMap(grid,grid$lo_wh+grid$lo_bl,name_var)
+plot
+ggsave("sp_lo.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+cols <- c(rev(brewer.pal(7, "OrRd")))
+
+```
+
+```{r matrix_WALK}
+
+#elevat <- get_elev_raster(grid,z=14)
+#writeRaster(elevat,"OBT/SP/elevation_sp.tiff")
+
+options(java.parameters = "-Xmx20G")
+Sys.setenv(JAVA_HOME="D:/Program Files/jdk-11")
+
+origin <- grid %>%
+  st_centroid() %>%
+  st_coordinates() %>%
+  as_tibble() %>%
+  cbind(GEO_ID = grid$id) %>%
+  select(GEO_ID,X,Y) %>%
+  mutate(GEO_ID = as.numeric(GEO_ID)) %>%
+  arrange(GEO_ID)
+colnames(origin) <- c("id","lon","lat")
+
+r5r_core <- setup_r5(data_path = "OBT/SP", verbose = FALSE)
+mode <- c("WALK")
+max_walk_dist <- 100000
+max_trip_duration <- 6*60
+departure_datetime <- as.POSIXct("19-03-2020 07:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+no_access <- NULL
+
+```
+
+```{r schools_WALK}
+
+schools <- read_csv2("OBT/catalogo_escolas_sp.csv") %>%
+  filter(`Restrição de Atendimento` == "ESCOLA EM FUNCIONAMENTO E SEM RESTRIÇÃO DE ATENDIMENTO") %>%
+  mutate(CO_ENTIDADE = `Código INEP`) %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2022.csv") %>%
+              filter(CO_MUNICIPIO == "3550308") %>%
+              mutate(quality2022 = QT_MAT_FUND_AI/QT_TUR_FUND_AI)%>%
+              select(CO_ENTIDADE,NO_ENTIDADE,QT_MAT_FUND,QT_MAT_FUND_AI,QT_MAT_FUND_AF,QT_MAT_MED,QT_DOC_FUND,QT_DOC_FUND_AI,QT_DOC_FUND_AF,QT_DOC_MED,quality2022),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2019.csv") %>%
+              filter(CO_MUNICIPIO == "3550308") %>%
+              mutate(quality2019 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2019),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2018.csv") %>%
+              filter(CO_MUNICIPIO == "3550308") %>%
+              mutate(quality2018 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2018),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2017.csv") %>%
+              filter(CO_MUNICIPIO == "3550308") %>%
+              mutate(quality2017 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2017),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2016.csv") %>%
+              filter(CO_MUNICIPIO == "3550308") %>%
+              mutate(quality2016 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2016),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2015.csv") %>%
+              filter(CO_MUNICIPIO == "3550308") %>%
+              mutate(quality2015 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2015),by="CO_ENTIDADE") %>%
+  filter(!is.na(Longitude)) %>%
+  mutate(Longitude = paste0(substr(Longitude,1,3),".",substr(Longitude,4,10)),
+         Latitude = paste0(substr(Latitude,1,3),".",substr(Latitude,4,10))) %>%
+  mutate_at(c("Longitude","Latitude"),as.numeric) 
+schools <- do.call(data.frame,lapply(schools,function(x) replace(x, is.infinite(x), NA)))
+schools[, 30:35] <- na_if(schools[, 30:35], 0) 
+
+schools <- schools %>%
+  filter(Categoria.Administrativa == "Pública") %>%
+  filter(QT_MAT_FUND_AI > 0)
+
+schools$quality <- apply(schools[,30:35], 1, median, na.rm=T)
+
+destination <- schools %>%
+  filter(QT_MAT_FUND_AI > 0) %>%
+  st_as_sf(coords=c("Longitude","Latitude")) %>%
+  st_set_crs(4326)
+
+destination %>%
+  ggplot() +
+  geom_sf(aes(color=QT_MAT_FUND_AI))
+
+destination <- schools %>%
+  ungroup() %>%
+  filter(QT_MAT_FUND_AI > 0) %>%
+  select(CO_ENTIDADE,Longitude,Latitude)
+colnames(destination) <- c("id","lon","lat")
+
+# calculate a travel time matrix
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origin,
+                          destinations = destination,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_dist = max_walk_dist,
+                          max_trip_duration = max_trip_duration,
+                          verbose = FALSE)
+
+head(ttm)
+saveRDS(ttm,"OBT/ttm_sp500_public_schools_EF1.rds")
+ttm <- readRDS("OBT/ttm_sp500_public_schools_EF1.rds")
+
+#### OBT ####
+
+grid <- grid %>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id)
+destination <- destination %>%
+  left_join(schools %>%
+  ungroup() %>%
+  filter(QT_MAT_FUND_AI > 0) %>%
+  select(CO_ENTIDADE,QT_MAT_FUND_AI),by=c("id"="CO_ENTIDADE"))%>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id) 
+
+# Population (supply)
+  pop <- round(grid$child_EF1_public)
+  row.signs <- rep("<=",length(pop))
+  row.rhs <- round(grid$child_EF1_public)
+  n_pop <- sum(pop)
+  
+  # School openings (demand)
+  jobs <- round(destination$QT_MAT_FUND_AI)
+  col.signs <- rep(">=",length(jobs))
+  col.rhs <- round(destination$QT_MAT_FUND_AI)
+  n_jobs <- sum(jobs)
+  
+  #Fix reapportion issues
+  if(n_jobs > n_pop){
+    aux <- n_pop/n_jobs
+    col.rhs <- col.rhs*aux
+    col.rhs <- diffRound(col.rhs)
+  }
+  
+  matrix <- tibble(fromId = rep(unique(grid$id),length(unique(destination$id))),
+                   toId = rep(unique(destination$id),each=length(unique(grid$id)))) %>%
+    mutate_at(c("fromId","toId"),as.numeric) %>%
+    left_join(ttm %>%
+    mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+    arrange(fromId,toId)
+  matrix[is.na(matrix)] = 100000 
+  
+  matrix <- matrix %>%
+    spread(key="toId",value="travel_time") %>%
+    column_to_rownames("fromId") %>%
+    as.matrix()
+  
+# OBT
+solution <- lp.transport(cost.mat = matrix,
+                         direction = "min",
+                         row.signs = row.signs,
+                         row.rhs = row.rhs,
+                         col.signs = col.signs,
+                         col.rhs = col.rhs)
+solution
+solution %>% saveRDS("OBT/solution_sp500_public_schools_EF1.rds")
+solution <- readRDS("OBT/solution_sp500_public_schools_EF1.rds")
+
+access <- solution$solution %>%
+  as_tibble() 
+colnames(access) <- destination$id
+access <- access %>%
+  mutate(fromId = origin$id) %>%
+  gather(key = "toId",value = "match",-c(fromId)) %>%
+  mutate_at(c("fromId","toId"),as.numeric) 
+
+sum(access$match)
+sum(jobs)
+
+match_schools <- access %>%
+  filter(match > 0) %>%
+  left_join(grid %>% st_drop_geometry(),by=c("fromId"="id")) %>%
+  left_join(schools,by=c("toId"="CO_ENTIDADE")) %>%
+  select("fromId","children_EF1","hi_wh","hi_bl","hi_ot","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot","child_EF1_public","pop_public","toId","QT_MAT_FUND_AI","quality","match")
+
+aux_desag <- access %>%
+  left_join(ttm %>%
+  mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+  ungroup() %>%
+  left_join(schools,by=c("toId"="CO_ENTIDADE")) %>%
+  filter(match > 0)
+
+access <- access %>%
+  left_join(ttm %>%
+  mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+  ungroup() %>%
+  group_by(fromId) %>%
+  summarise(travel_time=stats::weighted.mean(travel_time,match,na.rm=T),
+            match = sum(match,na.rm=T))
+access$travel_time[is.nan(access$travel_time)] <- NA
+
+access <- grid %>%
+  left_join(access,by=c("id"="fromId")) %>%
+  mutate(no_match = round(child_EF1_public)-match,
+         no_match_pct = (round(child_EF1_public)-match)/child_EF1_public) %>%
+  mutate(travel_time_final = travel_time) %>%
+  mutate(travel_time_final = ifelse(no_match > 0.5,5000,travel_time_final))
+  
+  name_var <- "Walking time to\nnearest school"
+  name_var2 <- "Children without\naccess to school"
+  plot <- PlotMap3(access,access$travel_time,name_var,access$no_match,name_var2)
+  plot
+  ggsave("sp_publicschoolsEF1_biv.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  schools <- schools %>%
+  filter(QT_MAT_FUND_AI > 0) %>%
+  st_as_sf(coords=c("Longitude","Latitude")) %>%
+  st_set_crs(4326) %>%
+    mutate(category = ifelse(quality > 30,"> 30 students/class","<= 30 students/class"))
+  
+  name_var <- "Walking time to\nnearest school"
+  name_var2 <- "Children without\naccess to school"
+  zoom_x <- c(-46.795,-46.57)
+  zoom_y <- c(-23.82,-23.62)
+  pos_legend <- c(0.85,0.4)
+  #zoom_x <- c(-46.85,-46.35)
+  #zoom_y <- c(-23.9,-23.4)
+  #pos_legend <- c(0.75,0.25)
+  plot <- PlotMap2(access,access$travel_time,name_var,access$no_match,name_var2,schools %>% filter(!is.na(quality)))
+  plot
+  ggsave("sp_publicschoolsEF1_biv_zoom.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  #ggsave("sp_publicschoolsEF1_biv_schools.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  access_schools <- access %>%
+    select(-c("left","top","right","bottom","ID_2","CD_GEOCODM","NM_MUNICIP"))
+  
+  access <- readRDS("OBT/access_publicschoolsEF1.rds")
+  access_schools %>% saveRDS("OBT/access_publicschoolsEF1.rds")
+  match_schools %>% saveRDS("OBT/match_publicschoolsEF1.rds")
+  
+  schools %>% ggplot() +
+  geom_histogram(aes(y=quality))
+  
+#### Other metrics ####
+  
+# Minimum travel time
+
+others <- ttm %>%
+    group_by(fromId) %>%
+    summarise(min_time = min(travel_time,na.rm=T)) %>%
+    mutate(fromId = as.numeric(fromId))
+  
+others <- ttm %>% mutate(toId = as.numeric(toId)) %>% left_join(destination,by=c("toId"="id")) %>%
+  mutate(cum15 = ifelse(travel_time <= 15,QT_MAT_FUND_AI,0),
+         cum30 = ifelse(travel_time <= 30,QT_MAT_FUND_AI,0)) %>%
+  group_by(fromId) %>%
+  summarise(cum15 = sum(cum15,na.rm=T),
+            cum30 = sum(cum30,na.rm=T))%>%
+  mutate(fromId = as.numeric(fromId)) %>%
+  left_join(others,by="fromId")
+  
+step1 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(destination,by=c("toId"="id")) %>%
+  left_join(grid %>% select(id,child_EF1_public),by=c("fromId"="id")) %>%
+  filter(QT_MAT_FUND_AI >= 1) %>%
+  mutate(step15 = ifelse(travel_time <= 15,child_EF1_public,0),
+         step30 = ifelse(travel_time <= 30,child_EF1_public,0)) %>%
+  group_by(toId) %>%
+  summarise(QT_MAT_FUND_AI = median(QT_MAT_FUND_AI,na.rm=T),
+            step15 = sum(step15,na.rm=T),
+            step30 = sum(step30,na.rm=T)) %>%
+  mutate_at(c("step15","step30"),~(p = QT_MAT_FUND_AI/(.)))
+
+step2 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(grid %>% select(id,child_EF1_public),by=c("fromId"="id")) %>%
+  filter(child_EF1_public >= 1) %>%
+  left_join(step1,by="toId") %>%
+  mutate(step15 = ifelse(travel_time <= 15,step15,0),
+         step30 = ifelse(travel_time <= 30,step30,0)) %>%
+  group_by(fromId) %>%
+  summarise_at(c("step15","step30"),~sum(.,na.rm = T))%>%
+  mutate(fromId = as.numeric(fromId))
+
+others <- others %>%
+  left_join(step2,by="fromId")
+
+others <- readRDS("OBT/access_publicschoolsEF1.rds") %>%
+  left_join(others,by=c("id"="fromId"))
+
+# Correlation
+corr <- others %>% st_drop_geometry() %>% select(travel_time,min_time,cum15,cum30,step15,step30) %>% mutate_all(as.numeric) %>% na.omit()
+colnames(corr) <- c("urban optimum","minimum time","15-min cum.","30-min cum.","15-min 2SFCA","30-min 2SFCA")
+round(cor(corr %>% mutate_all(scale)), 1)
+ggpairs(corr, title="",upper = list(continuous = wrap('cor', size = 12))) +
+  theme_minimal() +
+  theme(axis.text=element_text(size=18),
+        axis.title=element_text(size=18),
+        strip.text.x = element_text(size = 22),
+        strip.text.y = element_text(size = 22))
+ggsave("sp_publicschools_corr.png",device = "png",path = "OBT/Maps/",dpi = 600,width=20,height = 20)
+
+  name_var <- "Walking time to\nnearest school"
+  plot <- PlotMap(others,others$min_time,name_var)
+  plot
+  ggsave("sp_publicschoolsEF1_mintime.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "School seats\nin 15 minutes"
+  plot <- PlotMap(others,others$cum15,name_var)
+  plot
+  ggsave("sp_publicschoolsEF1_cum15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "School seats\nin 15 minutes"
+  plot <- PlotMap(others,others$step15,name_var)
+  plot
+  ggsave("sp_publicschoolsEF1_step15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+```
+
+```{r healthcare_WALK}
+
+ubs <- read_csv("OBT/sp_cnes_profissionais_2021.csv") %>%
+  mutate(CO_CNES = as.numeric(id_estabelecimento_cnes)) %>%
+  filter(atende_sus == "1") %>%
+  #filter(vinculo_contratado_sus == "1") %>%
+  filter(mes == 7) %>%
+  group_by(CO_CNES) %>%
+  summarise(doctors = round(sum(carga_horaria_ambulatorial,na.rm = T)/(36))) %>%
+  ungroup()
+
+#read_csv2("OBT/sp_cnes_estabelecimentos_2023.csv") %>%
+#  filter(IBGE == "355030") %>%
+#  write_csv("OBT/spcapital_cnes_estabelecimentos_2023.csv")
+
+ubs <- read_csv("OBT/spcapital_cnes_estabelecimentos_2023_cor.csv") %>%
+  left_join(ubs,by=c("CNES"="CO_CNES")) %>%
+  filter(doctors > 0) %>%
+  mutate(CO_ENTIDADE = CNES) %>%
+  rename(Longitude = "lon",
+         Latitude = "lat") %>%
+  mutate_at(c("Longitude","Latitude"),as.numeric) %>%
+  filter(!is.na(Latitude))
+
+ubs %>% ggplot() +
+  geom_point(aes(x=Longitude,y=Latitude,color=doctors))
+
+aux <- read_csv2("OBT/sp_especialidades_ubs_nov2022.csv") %>%
+  select(CNES,Frequência) %>%
+  mutate(CNES = as.numeric(CNES)) %>%
+  arrange(CNES)
+ubs <- ubs %>% left_join(aux,by="CNES") %>%
+  rename(quality = "Frequência")
+
+ubs %>% ggplot() +
+  geom_histogram(aes(y=quality))
+ubs %>%
+  summarise(median(quality,na.rm=T))
+
+ubs <- ubs %>%
+  mutate(category = ifelse(quality >= 11,">= 11 specialties","< 11 specialties")) %>%
+  arrange(CO_ENTIDADE)
+
+destination <- ubs %>%
+  st_as_sf(coords=c("Longitude","Latitude")) %>%
+  st_set_crs(4326)
+
+destination <- ubs %>%
+  ungroup() %>%
+  filter(doctors > 0) %>%
+  select(CO_ENTIDADE,Longitude,Latitude) %>%
+  mutate(CO_ENTIDADE = as.numeric(CO_ENTIDADE)) %>%
+  arrange(CO_ENTIDADE)
+colnames(destination) <- c("id","lon","lat")
+
+# calculate a travel time matrix
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origin,
+                          destinations = destination,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_dist = max_walk_dist,
+                          max_trip_duration = max_trip_duration,
+                          verbose = FALSE)
+
+
+head(ttm)
+saveRDS(ttm,"OBT/ttm_sp500_ubs.rds")
+ttm <- readRDS("OBT/ttm_sp500_ubs.rds")
+
+grid <- grid %>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id)
+destination <- destination %>%
+  left_join(ubs %>%
+  ungroup() %>%
+  filter(doctors > 0) %>%
+  select(CO_ENTIDADE,doctors),by=c("id"="CO_ENTIDADE"))%>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id) %>%
+  mutate(capacity = doctors*1000/3.5)
+
+# Population (supply)
+  pop <- round(grid$pop_public)
+  row.signs <- rep("<=",length(pop))
+  row.rhs <- round(grid$pop_public)
+  n_pop <- sum(pop)
+  
+  # School openings (demand)
+  jobs <- round(destination$capacity)
+  col.signs <- rep(">=",length(jobs))
+  col.rhs <- round(destination$capacity)
+  n_jobs <- sum(jobs)
+  
+  #Fix reapportion issues
+  if(n_jobs > n_pop){
+    aux <- n_pop/n_jobs
+    col.rhs <- col.rhs*aux
+    col.rhs <- diffRound(col.rhs)
+  }
+  
+  matrix <- tibble(fromId = rep(unique(grid$id),length(unique(destination$id))),
+                   toId = rep(unique(destination$id),each=length(unique(grid$id)))) %>%
+    mutate_at(c("fromId","toId"),as.numeric) %>%
+    left_join(ttm %>%
+    mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+    arrange(fromId,toId)
+  matrix[is.na(matrix)] = 100000 
+  
+  matrix <- matrix %>%
+    spread(key="toId",value="travel_time") %>%
+    column_to_rownames("fromId") %>%
+    as.matrix()
+  
+# OBT
+solution <- lp.transport(cost.mat = matrix,
+                         direction = "min",
+                         row.signs = row.signs,
+                         row.rhs = row.rhs,
+                         col.signs = col.signs,
+                         col.rhs = col.rhs)
+solution
+solution %>% saveRDS("OBT/solution_sp500_ubs_35.rds")
+solution <- readRDS("OBT/solution_sp500_ubs_35.rds")
+
+access <- solution$solution %>%
+  as_tibble() 
+colnames(access) <- destination$id
+access <- access %>%
+  mutate(fromId = origin$id) %>%
+  gather(key = "toId",value = "match",-c(fromId)) %>%
+  mutate_at(c("fromId","toId"),as.numeric) 
+
+sum(access$match)
+sum(jobs)
+
+match_ubs <- access %>%
+  filter(match > 0) %>%
+  left_join(grid %>% st_drop_geometry(),by=c("fromId"="id")) %>%
+  left_join(ubs,by=c("toId"="CNES")) %>%
+  select("fromId","hi_wh","hi_bl","hi_ot","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot","pop_public","toId","doctors","quality","category","match")
+
+access <- access %>%
+  left_join(ttm %>%
+  mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+  ungroup() %>%
+  group_by(fromId) %>%
+  summarise(travel_time=stats::weighted.mean(travel_time,match,na.rm=T),
+            match = sum(match,na.rm=T))
+access$travel_time[is.nan(access$travel_time)] <- NA
+
+access <- grid %>%
+  left_join(access,by=c("id"="fromId")) %>%
+  mutate(no_match = round(pop_public)-match,
+         no_match_pct = (round(pop_public)-match)/pop_public) %>%
+  mutate(travel_time_final = travel_time) %>%
+  mutate(travel_time_final = ifelse(no_match > 0.5,5000,travel_time_final))
+  
+  name_var <- "Walking time to\nnearest healthcare facility"
+  name_var2 <- "People without\naccess to healthcare facility"
+  plot <- PlotMap3(access,access$travel_time,name_var,access$no_match,name_var2)
+  plot
+  ggsave("sp_publicUBS_biv35.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "Walking time to\nnearest healthcare facility"
+  name_var2 <- "People without\naccess to healthcare facility"
+  zoom_x <- c(-46.56,-46.36)
+  zoom_y <- c(-23.68,-23.47)
+  pos_legend <- c(0.8,0.28)
+  #zoom_x <- c(-46.85,-46.35)
+  #zoom_y <- c(-23.9,-23.4)
+  #pos_legend <- c(0.75,0.25)
+  plot <- PlotMap2(access,access$travel_time,name_var,access$no_match,name_var2,ubs %>% rename(QT_MAT_FUND_AI = "doctors") %>% st_as_sf(coords = c("Longitude","Latitude")) %>% st_set_crs(4326))
+  plot
+  ggsave("sp_publicUBS_biv35_zoom.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  #ggsave("sp_publicUBS_biv4_ubs.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  access_ubs <- access %>%
+    select(-c("left","top","right","bottom","ID_2","CD_GEOCODM","NM_MUNICIP","child_EF1_public","child_EF1_private","children_EF1","children_EF2","young_EM"))
+  
+  access <- readRDS("OBT/access_publichealthcare.rds")
+  access_ubs %>% saveRDS("OBT/access_publichealthcare.rds")
+  match_ubs %>% saveRDS("OBT/match_publichealthcare.rds")
+  
+ #### Other metrics ####
+  
+# Minimum travel time
+
+others <- ttm %>%
+    group_by(fromId) %>%
+    summarise(min_time = min(travel_time,na.rm=T)) %>%
+    mutate(fromId = as.numeric(fromId))
+  
+others <- ttm %>% mutate(toId = as.numeric(toId)) %>% left_join(destination,by=c("toId"="id")) %>%
+  mutate(cum15 = ifelse(travel_time <= 15,capacity,0),
+         cum30 = ifelse(travel_time <= 30,capacity,0)) %>%
+  group_by(fromId) %>%
+  summarise(cum15 = sum(cum15,na.rm=T),
+            cum30 = sum(cum30,na.rm=T))%>%
+  mutate(fromId = as.numeric(fromId)) %>%
+  left_join(others,by="fromId")
+  
+step1 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(destination,by=c("toId"="id")) %>%
+  left_join(grid %>% select(id,pop_public),by=c("fromId"="id")) %>%
+  filter(capacity >= 1) %>%
+  mutate(step15 = ifelse(travel_time <= 15,pop_public,0),
+         step30 = ifelse(travel_time <= 30,pop_public,0)) %>%
+  group_by(toId) %>%
+  summarise(capacity = median(capacity,na.rm=T),
+            step15 = sum(step15,na.rm=T),
+            step30 = sum(step30,na.rm=T)) %>%
+  mutate_at(c("step15","step30"),~(p = capacity/(.)))
+
+step2 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(grid %>% select(id,pop_public),by=c("fromId"="id")) %>%
+  filter(pop_public >= 1) %>%
+  left_join(step1,by="toId") %>%
+  mutate(step15 = ifelse(travel_time <= 15,step15,0),
+         step30 = ifelse(travel_time <= 30,step30,0)) %>%
+  group_by(fromId) %>%
+  summarise_at(c("step15","step30"),~sum(.,na.rm = T))%>%
+  mutate(fromId = as.numeric(fromId))
+
+others <- others %>%
+  left_join(step2,by="fromId")
+
+others <- readRDS("OBT/access_publichealthcare.rds") %>%
+  left_join(others,by=c("id"="fromId"))
+
+# Correlation
+corr <- others %>% st_drop_geometry() %>% select(travel_time,min_time,cum15,cum30,step15,step30) %>% mutate_all(as.numeric) %>% na.omit()
+colnames(corr) <- c("urban optimum","minimum time","15-min cum.","30-min cum.","15-min 2SFCA","30-min 2SFCA")
+round(cor(corr %>% mutate_all(scale)), 1)
+ggpairs(corr, title="",upper = list(continuous = wrap('cor', size = 12))) +
+  theme_minimal() +
+  theme(axis.text=element_text(size=18),
+        axis.title=element_text(size=18),
+        strip.text.x = element_text(size = 22),
+        strip.text.y = element_text(size = 22))
+ggsave("sp_publicubs_corr.png",device = "png",path = "OBT/Maps/",dpi = 600,width=20,height = 20)
+
+  name_var <- "Walking time to\nnearest healthcare facility"
+  plot <- PlotMap(others,others$min_time,name_var)
+  plot
+  ggsave("sp_publicubs_mintime.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "Service capacity\nin 15 minutes"
+  plot <- PlotMap(others,others$cum15,name_var)
+  plot
+  ggsave("sp_publicubs_cum15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "Service capacity\nin 15 minutes"
+  plot <- PlotMap(others,others$step15,name_var)
+  plot
+  ggsave("sp_publicubs_step15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  
+```
+
+```{r greenspace_WALK}
+squares <- st_read("OBT/SIRGAS_SHP_quadraviariaed_2017.shp") %>%
+  filter(qe_tipo == "Praca_Canteiro") %>%
+  st_set_crs(31983) %>%
+  st_make_valid() %>%
+  left_join(read_csv("OBT/SIRGAS_SHP_quadraviariaed_2017_dimensions.csv"),by="qe_id")%>%
+  filter(width_height > 0.16) 
+
+logradouros <- st_read("OBT/LOG2020_CEM_RMSP_sirgas.shp") %>%
+  filter(MUNICIPIO == "SAO PAULO") %>%
+  st_transform(31983)
+
+pqs_log <- logradouros %>%
+  filter(TIPO %in% c("JD","PC","PQ"))
+
+logradouros <- logradouros %>%
+  filter(!TIPO %in% c("JD","PC","PQ"))
+
+logs <- logradouros %>%
+  filter(TIPO %in% c("AC","AL","BC","BL","CL","CM","EC","LG","LO","LA","PL","PO","PP","EL","PS","PT","R","RP","TO","TP","TV","VA","VD","VE","VP","VE")) %>%
+  st_buffer(8) %>%
+  bind_rows(logradouros %>%
+  filter(TIPO %in% c("AV","BT","CN","CV","ES","PE","RO","TN")) %>%
+  st_buffer(20)) %>%
+  bind_rows(logradouros %>%
+  filter(TIPO %in% c("MR","RV","EX")) %>%
+  st_buffer(50)) %>%
+  summarise()
+
+leaflet() %>%
+  addPolygons(data = logs %>% st_transform(4326),
+              color = "#444444", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addPolygons(data = squares %>% st_transform(4326),
+              color = "red", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addTiles()
+
+squares <- ms_erase(as_Spatial(squares),as_Spatial(logs))%>% st_as_sf()
+parks <- st_read("OBT/sp_parques_cem.shp") %>%
+  st_transform(31983) %>%
+  filter(CATEG %in% c("PRACA","PARQUE URBANO","PARQUE LINEAR"))
+
+leaflet() %>%
+  addPolygons(data = squares %>% st_transform(4326),
+              color = "red", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addPolygons(data = parks %>% st_transform(4326),
+              color = "green", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addTiles()
+
+green <- bind_rows(squares,parks) %>%
+  summarise() %>%
+  st_cast("POLYGON") %>%
+  mutate(area = as.numeric(st_area(.)))%>%
+                filter(area >= 100) %>%
+  select(-area)
+
+leaflet() %>%
+  addPolygons(data = green %>% st_transform(4326) ,
+              color = "green", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addTiles()
+
+green <- st_intersection(green,grid %>% st_transform(31983)) %>%
+  mutate(area = st_area(.)) %>%
+  mutate(capacity = as.numeric(area)/4) %>%
+  mutate(newid = row_number()) %>%
+  arrange(newid)
+sum(green$capacity)
+
+#### Greenspace ####
+
+destination <- green %>%
+  st_centroid() %>%
+  st_transform(4326)
+
+destination %>%
+  ggplot() +
+  geom_sf(aes(color=capacity))
+
+destination <- destination %>%
+    mutate(lon = unlist(map(destination$geometry,1)),
+           lat = unlist(map(destination$geometry,2))) %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  select(newid,lon,lat) %>%
+  rename(id = "newid") %>%
+  arrange(id)
+
+# calculate a travel time matrix
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origin,
+                          destinations = destination,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_dist = max_walk_dist,
+                          max_trip_duration = max_trip_duration,
+                          verbose = FALSE)
+
+head(ttm)
+saveRDS(ttm,"OBT/ttm_sp500_green.rds")
+ttm <- readRDS("OBT/ttm_sp500_green.rds")
+
+green <- green %>%
+  st_drop_geometry()
+
+grid <- grid %>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id)
+destination <- destination %>%
+  left_join(green %>%
+  ungroup() %>%
+  select(newid,area,capacity),by=c("id"="newid"))%>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id) 
+
+# Population (supply)
+  pop <- round(grid$pop)
+  row.signs <- rep("<=",length(pop))
+  row.rhs <- round(grid$pop)
+  n_pop <- sum(pop)
+  
+  # School openings (demand)
+  jobs <- round(destination$capacity)
+  col.signs <- rep(">=",length(jobs))
+  col.rhs <- round(destination$capacity)
+  n_jobs <- sum(jobs)
+  
+  #Fix reapportion issues
+  if(n_jobs > n_pop){
+    aux <- n_pop/n_jobs
+    col.rhs <- col.rhs*aux
+    col.rhs <- diffRound(col.rhs)
+  }
+  
+  matrix <- tibble(fromId = rep(unique(grid$id),length(unique(destination$id))),
+                   toId = rep(unique(destination$id),each=length(unique(grid$id)))) %>%
+    mutate_at(c("fromId","toId"),as.numeric) %>%
+    left_join(ttm %>%
+    mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+    arrange(fromId,toId)
+  matrix[is.na(matrix)] = 100000 
+  
+  matrix <- matrix %>%
+    spread(key="toId",value="travel_time") %>%
+    column_to_rownames("fromId") %>%
+    as.matrix()
+  
+# OBT
+solution <- lp.transport(cost.mat = matrix,
+                         direction = "min",
+                         row.signs = row.signs,
+                         row.rhs = row.rhs,
+                         col.signs = col.signs,
+                         col.rhs = col.rhs)
+solution
+solution %>% saveRDS("OBT/solution_sp500_green4.rds")
+solution <- readRDS("OBT/solution_sp500_green4.rds")
+
+access <- solution$solution %>%
+  as_tibble() 
+colnames(access) <- destination$id
+access <- access %>%
+  mutate(fromId = origin$id) %>%
+  gather(key = "toId",value = "match",-c(fromId)) %>%
+  mutate_at(c("fromId","toId"),as.numeric) 
+
+sum(access$match)
+sum(jobs)
+
+match_green <- access %>%
+  filter(match > 0) %>%
+  left_join(grid %>% st_drop_geometry(),by=c("fromId"="id")) %>%
+  left_join(green %>% select(newid,area,capacity),by=c("toId"="newid")) %>%
+  select("fromId","hi_wh","hi_bl","hi_ot","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot","pop_public","toId","area","capacity","match")
+
+access <- access %>%
+  left_join(ttm %>%
+  mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+  ungroup() %>%
+  group_by(fromId) %>%
+  summarise(travel_time=stats::weighted.mean(travel_time,match,na.rm=T),
+            match = sum(match,na.rm=T))
+access$travel_time[is.nan(access$travel_time)] <- NA
+
+access <- grid %>%
+  left_join(access,by=c("id"="fromId")) %>%
+  mutate(no_match = round(pop)-match,
+         no_match_pct = (round(pop)-match)/pop) %>%
+  mutate(travel_time_final = travel_time) %>%
+  mutate(travel_time_final = ifelse(no_match > 0.5,5000,travel_time_final))
+  
+  name_var <- "Walking time to\nnearest greenspace"
+  name_var2 <- "People without\naccess to greenspace"
+  plot <- PlotMap3(access,access$travel_time,name_var,access$no_match,name_var2)
+  plot
+  ggsave("sp_greenspace4.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  access_green <- access %>%
+    select(-c("left","top","right","bottom","ID_2","CD_GEOCODM","NM_MUNICIP","child_EF1_public","child_EF1_private","children_EF1","children_EF2","young_EM"))
+  
+  access <- readRDS("OBT/access_greenspace.rds")
+  access_green %>% saveRDS("OBT/access_greenspace.rds")
+  match_green %>% saveRDS("OBT/match_greenspace.rds")
+  
+   #### Other metrics ####
+  
+# Minimum travel time
+
+others <- ttm %>%
+    group_by(fromId) %>%
+    summarise(min_time = min(travel_time,na.rm=T)) %>%
+    mutate(fromId = as.numeric(fromId))
+  
+others <- ttm %>% mutate(toId = as.numeric(toId)) %>% left_join(destination,by=c("toId"="id")) %>%
+  mutate(cum15 = ifelse(travel_time <= 15,capacity,0),
+         cum30 = ifelse(travel_time <= 30,capacity,0)) %>%
+  group_by(fromId) %>%
+  summarise(cum15 = sum(cum15,na.rm=T),
+            cum30 = sum(cum30,na.rm=T))%>%
+  mutate(fromId = as.numeric(fromId)) %>%
+  left_join(others,by="fromId")
+  
+step1 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(destination,by=c("toId"="id")) %>%
+  left_join(grid %>% select(id,pop),by=c("fromId"="id")) %>%
+  filter(capacity >= 1) %>%
+  mutate(step15 = ifelse(travel_time <= 15,pop,0),
+         step30 = ifelse(travel_time <= 30,pop,0)) %>%
+  group_by(toId) %>%
+  summarise(capacity = median(capacity,na.rm=T),
+            step15 = sum(step15,na.rm=T),
+            step30 = sum(step30,na.rm=T)) %>%
+  mutate_at(c("step15","step30"),~(p = capacity/(.)))
+
+step2 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(grid %>% select(id,pop),by=c("fromId"="id")) %>%
+  filter(pop >= 1) %>%
+  left_join(step1,by="toId") %>%
+  mutate(step15 = ifelse(travel_time <= 15,step15,0),
+         step30 = ifelse(travel_time <= 30,step30,0)) %>%
+  group_by(fromId) %>%
+  summarise_at(c("step15","step30"),~sum(.,na.rm = T))%>%
+  mutate(fromId = as.numeric(fromId))
+
+others <- others %>%
+  left_join(step2,by="fromId")
+
+others <- readRDS("OBT/access_greenspace.rds") %>%
+  left_join(others,by=c("id"="fromId"))
+
+# Correlation
+corr <- others %>% st_drop_geometry() %>% select(travel_time,min_time,cum15,cum30,step15,step30) %>% mutate_all(as.numeric) %>% na.omit()
+colnames(corr) <- c("urban optimum","minimum time","15-min cum.","30-min cum.","15-min 2SFCA","30-min 2SFCA")
+round(cor(corr %>% mutate_all(scale)), 1)
+ggpairs(corr, title="",upper = list(continuous = wrap('cor', size = 12))) +
+  theme_minimal() +
+  theme(axis.text=element_text(size=18),
+        axis.title=element_text(size=18),
+        strip.text.x = element_text(size = 22),
+        strip.text.y = element_text(size = 22))
+ggsave("sp_greenspace_corr.png",device = "png",path = "OBT/Maps/",dpi = 600,width=20,height = 20)
+
+  name_var <- "Walking time to\nnearest greenspace"
+  plot <- PlotMap(others,others$min_time,name_var)
+  plot
+  ggsave("sp_greenspace_mintime.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "Greenspace (m²)\nin 15 minutes"
+  plot <- PlotMap(others,others$cum15,name_var)
+  plot
+  ggsave("sp_greenspace_cum15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "Greenspace (m²)\nin 15 minutes"
+  plot <- PlotMap(others,others$step15,name_var)
+  plot
+  ggsave("sp_greenspace_step15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+```
+
+```{r matrix_TRANSIT}
+
+#elevat <- get_elev_raster(grid,z=14)
+#writeRaster(elevat,"OBT/SP/elevation_sp.tiff")
+
+options(java.parameters = "-Xmx20G")
+Sys.setenv(JAVA_HOME="D:/Program Files/jdk-11")
+
+origin <- grid %>%
+  st_centroid() %>%
+  st_coordinates() %>%
+  as_tibble() %>%
+  cbind(GEO_ID = grid$id) %>%
+  select(GEO_ID,X,Y) %>%
+  mutate(GEO_ID = as.numeric(GEO_ID)) %>%
+  arrange(GEO_ID)
+colnames(origin) <- c("id","lon","lat")
+
+r5r_core <- setup_r5(data_path = "OBT/SP2", verbose = FALSE)
+
+
+
+mode <- c("WALK","TRANSIT")
+max_walk_dist <- 100000
+max_trip_duration <- 6*60
+departure_datetime <- as.POSIXct("10-12-2022 10:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+box <- st_bbox(grid)
+no_access <- NULL
+
+```
+
+```{r greenspace_TRANSIT}
+
+squares <- st_read("OBT/SIRGAS_SHP_quadraviariaed_2017.shp") %>%
+  filter(qe_tipo == "Praca_Canteiro") %>%
+  st_set_crs(31983) %>%
+  st_make_valid() %>%
+  left_join(read_csv("OBT/SIRGAS_SHP_quadraviariaed_2017_dimensions.csv"),by="qe_id")%>%
+  filter(width_height > 0.16) 
+
+logradouros <- st_read("OBT/LOG2020_CEM_RMSP_sirgas.shp") %>%
+  filter(MUNICIPIO == "SAO PAULO") %>%
+  st_transform(31983)
+
+pqs_log <- logradouros %>%
+  filter(TIPO %in% c("JD","PC","PQ"))
+
+logradouros <- logradouros %>%
+  filter(!TIPO %in% c("JD","PC","PQ"))
+
+logs <- logradouros %>%
+  filter(TIPO %in% c("AC","AL","BC","BL","CL","CM","EC","LG","LO","LA","PL","PO","PP","EL","PS","PT","R","RP","TO","TP","TV","VA","VD","VE","VP","VE")) %>%
+  st_buffer(8) %>%
+  bind_rows(logradouros %>%
+  filter(TIPO %in% c("AV","BT","CN","CV","ES","PE","RO","TN")) %>%
+  st_buffer(20)) %>%
+  bind_rows(logradouros %>%
+  filter(TIPO %in% c("MR","RV","EX")) %>%
+  st_buffer(50)) %>%
+  summarise()
+
+squares <- ms_erase(as_Spatial(squares),as_Spatial(logs))%>% st_as_sf()
+parks <- st_read("OBT/sp_parques_cem.shp") %>%
+  st_transform(31983) %>%
+  filter(CATEG %in% c("PRACA","PARQUE URBANO","PARQUE LINEAR"))
+
+green <- bind_rows(squares,parks) %>%
+  summarise() %>%
+  st_cast("POLYGON") %>%
+  mutate(area = as.numeric(st_area(.)))%>%
+                filter(area >= 100) %>%
+  select(-area)
+
+green <- st_intersection(green,grid %>% st_transform(31983)) %>%
+  mutate(area = st_area(.)) %>%
+  mutate(capacity = as.numeric(area)) %>%
+  mutate(newid = row_number()) %>%
+  arrange(newid)
+sum(green$capacity)
+
+destination <- green %>%
+  st_centroid() %>%
+  st_transform(4326)
+
+destination %>%
+  ggplot() +
+  geom_sf(aes(color=capacity))
+
+destination <- destination %>%
+    mutate(lon = unlist(map(destination$geometry,1)),
+           lat = unlist(map(destination$geometry,2))) %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  select(newid,lon,lat) %>%
+  rename(id = "newid") %>%
+  arrange(id)
+
+# calculate a travel time matrix
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origin,
+                          destinations = destination,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_dist = max_walk_dist,
+                          max_trip_duration = max_trip_duration,
+                          verbose = FALSE)
+
+head(ttm)
+saveRDS(ttm,"OBT/ttm_sp500_green_transit.rds")
+ttm <- readRDS("OBT/ttm_sp500_green_transit.rds")
+
+access <- ttm %>%
+  mutate_all(as.numeric) %>%
+  filter(travel_time <= 60) %>%
+  left_join(green %>% select(newid,area,capacity),by=c("toId"="newid")) %>%
+  mutate(time10 = ifelse(travel_time <= 10,capacity,0),
+         time20 = ifelse(travel_time <= 20,capacity,0),
+         time30 = ifelse(travel_time <= 30,capacity,0),
+         time40 = ifelse(travel_time <= 40,capacity,0),
+         time50 = ifelse(travel_time <= 50,capacity,0),
+         time60 = ifelse(travel_time <= 60,capacity,0)) %>%
+  group_by(fromId) %>%
+  summarise(time10 = sum(time10,na.rm=T),
+            time20 = sum(time20,na.rm = T),
+            time30 = sum(time30,na.rm=T),
+            time40 = sum(time40,na.rm=T),
+            time50 = sum(time50,na.rm=T),
+            time60 = sum(time60,na.rm=T))
+
+access <- grid %>%
+  left_join(access,by=c("id"="fromId"))
+
+name_var <- "Greenspace accessible\nwithin 30 min. by transit"
+plot <- PlotMap(access,access$time30/sum(grid$pop,na.rm=T),name_var)
+plot
+ggsave("sp_green_transit.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+
+  access_green_transit <- access %>%
+    select(-c("left","top","right","bottom","ID_2","CD_GEOCODM","NM_MUNICIP","child_EF1_public","child_EF1_private","children_EF1","children_EF2","young_EM"))
+  
+  access_green_transit %>% saveRDS("OBT/access_green_transit.rds")
+  
+```
+
+```{r lisa_map_priority}
+
+grid <- st_read("OBT/sp_grid_data500.shp") 
+
+aux <- od %>%
+  filter(F_PESS == 1) %>%
+  filter(QT_AUTO == 0) %>%
+  group_by(CO_DOM_X,CO_DOM_Y,categoria) %>%
+  summarise(n_pessoas = sum(FE_PESS)) %>%
+  st_as_sf(coords = c("CO_DOM_X","CO_DOM_Y")) %>%
+  st_set_crs(31983) %>%
+  st_transform(4326) 
+
+aux <- aux %>%
+  st_join(grid %>% select(id),join = st_intersects) %>%
+  st_drop_geometry() %>%
+  group_by(id,categoria) %>%
+  summarise(n_pessoas = sum(n_pessoas)) %>%
+  spread(key="categoria",value="n_pessoas") %>%
+  mutate_all(~replace_na(.,0))
+  
+aux <- grid %>%
+  left_join(aux,by="id")%>%
+  mutate_at(c("Men","Men with child","Men with elderly","Women","Women with child","Women with elderly"),~replace_na(.,0)) %>%
+  mutate(women_child_elderly = `Women with child`+`Women with elderly`)
+
+aux %>%
+  ggplot() +
+  geom_sf(aes(fill=women_elderly+mothers),color="transparent")
+
+  name_var <- "Women with child or elderly\nwithout a car"
+  plot <- PlotMap(aux,aux$women_elderly+aux$mothers,name_var)
+  plot
+  ggsave("sp_women_child_elderly.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+nb <- poly2nb(grid)
+lw <- nb2listw(nb, style = "B", zero.policy = T)
+W  <- as(lw, "symmetricMatrix")
+W  <- as.matrix(W/rowSums(W))
+W[which(is.na(W))] <- 0
+
+#### Primary schools ####
+
+access_schools <- readRDS("OBT/access_publicschoolsEF1.rds") %>%
+  left_join(aux %>%
+              st_drop_geometry() %>%
+              select("id","Men","Men with child","Men with elderly","Women","Women with child","Women with elderly","women_child_elderly"),by="id")
+
+
+# Variables to use in the correlation: white and black population in each census track
+x <- access_schools$women_child_elderly
+y <- access_schools$no_match
+
+#======================================================
+# Calculating the index and its simulated distribution
+# for global and local values
+
+m   <- moran_I(x, y, W)
+m[[1]] # global value
+
+m_i <- m[[2]]  # local values
+
+local_sims <- simula_moran(x, y, W)$local_sims
+
+# Identifying the significant values 
+alpha <- .05  # for a 95% confidence interval
+probs <- c(alpha/2, 1-alpha/2)
+intervals <- t( apply(local_sims, 1, function(x) quantile(x, probs=probs)))
+sig        <- ( m_i < intervals[,1] )  | ( m_i > intervals[,2] )
+
+#======================================================
+# Preparing for plotting
+
+access_schools$sig <- sig
+
+# Identifying the LISA patterns
+xp <- (x-mean(x))/sd(x)
+yp <- (y-mean(y))/sd(y)
+
+patterns <- as.character( interaction(xp > 0, W%*%yp > 0) ) 
+patterns <- patterns %>% 
+        str_replace_all("TRUE","High") %>% 
+        str_replace_all("FALSE","Low")
+patterns[access_schools$sig==0] <- "Not significant"
+access_schools$patterns <- patterns
+
+  name_var <- "Lisa map\nPrimary schools"
+  plot <- PlotMap_lisa(access_schools,access_schools$patterns,name_var)
+  plot
+  ggsave("sp_lisa_schoolsEF1.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+#### Healthcare facilities ####
+access_ubs <- readRDS("OBT/access_publichealthcare.rds") %>%
+  left_join(aux %>%
+              st_drop_geometry() %>%
+              select("id","Men","Men with child","Men with elderly","Women","Women with child","Women with elderly","women_child_elderly"),by="id")
+
+
+# Variables to use in the correlation: white and black population in each census track
+x <- access_ubs$women_child_elderly
+y <- access_ubs$no_match
+
+#======================================================
+# Calculating the index and its simulated distribution
+# for global and local values
+
+m   <- moran_I(x, y, W)
+m[[1]] # global value
+
+m_i <- m[[2]]  # local values
+
+local_sims <- simula_moran(x, y, W)$local_sims
+
+# Identifying the significant values 
+alpha <- .05  # for a 95% confidence interval
+probs <- c(alpha/2, 1-alpha/2)
+intervals <- t( apply(local_sims, 1, function(x) quantile(x, probs=probs)))
+sig        <- ( m_i < intervals[,1] )  | ( m_i > intervals[,2] )
+
+#======================================================
+# Preparing for plotting
+
+access_ubs$sig <- sig
+
+# Identifying the LISA patterns
+xp <- (x-mean(x))/sd(x)
+yp <- (y-mean(y))/sd(y)
+
+patterns <- as.character( interaction(xp > 0, W%*%yp > 0) ) 
+patterns <- patterns %>% 
+        str_replace_all("TRUE","High") %>% 
+        str_replace_all("FALSE","Low")
+patterns[access_ubs$sig==0] <- "Not significant"
+access_ubs$patterns <- patterns
+
+  name_var <- "Lisa map\nHealthcare facilities"
+  plot <- PlotMap_lisa(access_ubs,access_ubs$patterns,name_var)
+  plot
+  ggsave("sp_lisa_healthcare.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  
+#### Greenspace ####
+  
+access_green <- readRDS("OBT/access_greenspace.rds") %>%
+  left_join(aux %>%
+              st_drop_geometry() %>%
+              select("id","Men","Men with child","Men with elderly","Women","Women with child","Women with elderly","women_child_elderly"),by="id")
+
+
+# Variables to use in the correlation: white and black population in each census track
+x <- access_green$women_child_elderly
+y <- access_green$no_match
+
+#======================================================
+# Calculating the index and its simulated distribution
+# for global and local values
+
+m   <- moran_I(x, y, W)
+m[[1]] # global value
+
+m_i <- m[[2]]  # local values
+
+local_sims <- simula_moran(x, y, W)$local_sims
+
+# Identifying the significant values 
+alpha <- .05  # for a 95% confidence interval
+probs <- c(alpha/2, 1-alpha/2)
+intervals <- t( apply(local_sims, 1, function(x) quantile(x, probs=probs)))
+sig        <- ( m_i < intervals[,1] )  | ( m_i > intervals[,2] )
+
+#======================================================
+# Preparing for plotting
+
+access_green$sig <- sig
+
+# Identifying the LISA patterns
+xp <- (x-mean(x))/sd(x)
+yp <- (y-mean(y))/sd(y)
+
+patterns <- as.character( interaction(xp > 0, W%*%yp > 0) ) 
+patterns <- patterns %>% 
+        str_replace_all("TRUE","High") %>% 
+        str_replace_all("FALSE","Low")
+patterns[access_green$sig==0] <- "Not significant"
+access_green$patterns <- patterns
+
+  name_var <- "Lisa map\nGreenspaces"
+  plot <- PlotMap_lisa(access_green,access_green$patterns,name_var)
+  plot
+  ggsave("sp_lisa_greenspaces.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+
+```
+
+# Curitiba
+
+```{r maps_functions}
+
+  mun <- st_read(paste0("Inputs/Map_Elements/pr_mun_MR.shp"))
+  mun_city <- st_read(paste0("Inputs/Map_Elements/pr_mun.shp"))
+  transport <- st_read(paste0("Inputs/Map_Elements/pr_transport_axes.shp"))
+  mask <- st_read(paste0("Inputs/Land_Cover/Shapefiles/pr_cover_MR.shp"))
+  back <- st_read("Inputs/Map_Elements/br_mun.shp")
+
+# Base theme map
+theme_map <- function(...){
+  theme(
+    axis.line = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "#f0f0f0", color = NA),
+    plot.title = element_blank(),
+    plot.subtitle = element_blank(),
+    legend.title = element_text(size = 12, color = "#4e4d47",family="Helvetica"),
+    legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47",family="Helvetica"),
+    legend.background = element_rect(fill = alpha('white', 0.5)),
+    #legend.key = element_rect(color = NA, fill = NA),
+    legend.key.size = unit(12, "cm"),
+    ...)}
+
+# Map for numeric variables
+
+PlotMap <- function(base,variable,name_var) {
+  
+  zoom_x <- c(-49.4,-49.13)
+  zoom_y <- c(-25.65,-25.345)
+  bar_scale <- 5
+  pos_legend <- c(0.78,0.25)
+  
+  breaks <- c(0,5,10,15,20,25,30,1000)
+  base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  breaks_scale <- levels(base$breaks) %>% as.numeric()
+  labels <- c(paste0(breaks[2:7]," min."),"> 30 min.")
+  
+  #breaks <- c(0,100,250,500,750,1000,2500,5000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]),"> 2500")
+  
+  #breaks <- c(0,0.1,0.25,0.5,0.75,1,2.5,30)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]),"> 2.5")
+  
+  #breaks <- c(0,1000,2500,5000,7500,10000,25000,500000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]),"> 25000")
+  
+  breaks <- c(0,100,500,1000,2500,5000,10000,1000000)
+  base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  breaks_scale <- levels(base$breaks) %>% as.numeric()
+  labels <- c(paste0(breaks[2:7]),"> 10000")
+  
+  #breaks <- c(0,0.1,0.25,0.5,0.75,1,2.5,50000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]),"> 2.5")
+  
+  #breaks=c(0,10,20,30,40,50,60,1000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]," min."),"> 60 min.")
+  
+  #breaks=c(0,50,5000,20000,40000,80000,100000,10000000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7]," m²"),"> 100,000 m²")
+  
+  #breaks=c(0,200,400,600,1000,1800,2400,3000,10000)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:9])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- breaks[2:9]
+  
+  #breaks=c(0,0.001,0.005,0.01,0.05,0.1,0.2,10)
+  #base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  #breaks_scale <- levels(base$breaks) %>% as.numeric()
+  #labels <- c(paste0(breaks[2:7],"m²/inhab."),"> 0.2 m²/inhab.")
+  
+  # Plot map
+  map <- ggplot() +
+    geom_sf(data = back %>% filter(DN == "0"), mapping = aes(), fill = "#f0f0f0", size = 0.3, color = "white") +
+    theme_map() +
+    theme(legend.position = pos_legend) + 
+    #geom_sf(data = hex,mapping=aes(),fill = "#C5C5C5",color = NA) +
+    geom_sf(data = base, aes(fill = breaks), color = NA)  +
+    scale_fill_manual(
+      values = rev(cols),
+      breaks = rev(breaks_scale),
+      name = name_var,
+      drop = FALSE,
+      labels = rev(labels),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    geom_sf(data = mask %>% filter(DN != 3), mapping = aes(), fill = "white", color = NA) +
+    geom_sf(data = mun_city %>% summarise(), mapping = aes(), fill = "transparent", color = "white", size = 0.7) +
+    geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.5,linetype = "dashed") +
+    coord_sf(xlim=zoom_x,ylim=zoom_y) +
+    ggsn::scalebar(data = mun_city, dist = bar_scale, st.color = "#4e4d47", st.size=2, box.fill = c("#4e4d47","#f0f0f0"), box.color = "#4e4d47", border.size = 0.2, height=0.015, dist_unit = "km", location = "bottomright", model = 'WGS84',transform = TRUE, anchor = c(x=zoom_x[2], y=zoom_y[1])) +
+    ggsn::north(data = mun_city, location = "topright", scale = 0.1, symbol = 6, anchor = c(x=zoom_x[2], y=zoom_y[2]))
+  
+  return(map)
+}
+
+PlotMap3 <- function(base,variable,name_var,variable2,name_var2) {
+  
+  zoom_x <- c(-49.4,-49.13)
+  zoom_y <- c(-25.65,-25.345)
+  bar_scale <- 5
+  pos_legend <- c(0.78,0.25)
+  
+  breaks <- c(0,5,10,15,20,25,30,1000)
+  #breaks <- c(0,10,20,30,40,50,60,10000)
+  base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  breaks_scale <- levels(base$breaks) %>% as.numeric()
+  labels <- c(paste0(breaks[2:7]," min."),"> 30 min.")
+  
+  breaks2 <- c(0,10,50,100,200,400,600,1000000)
+  base$breaks2 <- cut(variable2,breaks = breaks2,include.lowest = TRUE,labels = breaks2[2:8])
+  breaks_scale2 <- levels(base$breaks2) %>% as.numeric()
+  labels2 <- c(paste0(breaks2[2:7]," people"),"> 600 people")
+  
+  # Plot map
+  map <- ggplot() +
+    geom_sf(data = back %>% filter(DN == "0"), mapping = aes(), fill = "#f0f0f0", size = 0.3, color = "white") +
+    theme_map() +
+    theme(legend.position = pos_legend) + 
+    #geom_sf(data = hex,mapping=aes(),fill = "#C5C5C5",color = NA) +
+    
+    geom_sf(data = base, aes(fill = breaks), color = NA)  +
+    scale_fill_manual(
+      values = cols,
+      breaks = rev(breaks_scale),
+      name = name_var,
+      drop = FALSE,
+      labels = rev(labels),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    new_scale_fill() +
+    
+    geom_sf(data=base, aes(fill = breaks2,alpha = breaks2),color=NA) +
+    
+    scale_fill_manual(
+      values = cols2,
+      breaks = rev(breaks_scale2),
+      name = name_var2,
+      drop = FALSE,
+      labels = rev(labels2),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    scale_alpha_manual(
+      values = c(0,0.2,0.4,0.8,0.8,1,1),
+      guide='none') +
+    
+    geom_sf(data = mask %>% filter(DN != 3), mapping = aes(), fill = "white", color = NA) +
+    geom_sf(data = mun_city %>% summarise(), mapping = aes(), fill = "transparent", color = "white", size = 0.7) +
+    geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.5,linetype = "dashed") +
+    coord_sf(xlim=zoom_x,ylim=zoom_y) +
+    ggsn::scalebar(data = mun_city, dist = bar_scale, st.color = "#4e4d47", st.size=2, box.fill = c("#4e4d47","#f0f0f0"), box.color = "#4e4d47", border.size = 0.2, height=0.015, dist_unit = "km", location = "bottomleft", model = 'WGS84',transform = TRUE, anchor = c(x=zoom_x[1], y=zoom_y[1])) +
+    ggsn::north(data = mun_city, location = "topright", scale = 0.1, symbol = 6, anchor = c(x=zoom_x[2], y=zoom_y[2]))
+  
+  return(map)
+}
+
+PlotMap2 <- function(base,variable,name_var,variable2,name_var2,equip) {
+  
+  bar_scale <- 7.5
+  
+  #breaks <- c(0,5,10,15,20,25,30,10000)
+  breaks <- c(0,10,20,30,40,50,60,1000)
+  base$breaks <- cut(variable,breaks = breaks,include.lowest = TRUE,labels = breaks[2:8])
+  breaks_scale <- levels(base$breaks) %>% as.numeric()
+  labels <- c(paste0(breaks[2:7]," min."),"> 60 min.")
+  
+  breaks2 <- c(0,10,50,100,200,400,600,100000)
+  base$breaks2 <- cut(variable2,breaks = breaks2,include.lowest = TRUE,labels = breaks2[2:8])
+  breaks_scale2 <- levels(base$breaks2) %>% as.numeric()
+  labels2 <- c(paste0(breaks2[2:7]," people"),"> 600 people")
+  
+  # Plot map
+  map <- ggplot() +
+    geom_sf(data = back %>% filter(DN == "0"), mapping = aes(), fill = "#f0f0f0", size = 0.3, color = "white") +
+    theme_map() +
+    theme(legend.position = pos_legend) + 
+    #geom_sf(data = hex,mapping=aes(),fill = "#C5C5C5",color = NA) +
+    
+    geom_sf(data = base, aes(fill = breaks), color = NA)  +
+    scale_fill_manual(
+      values = cols,
+      breaks = rev(breaks_scale),
+      name = name_var,
+      drop = FALSE,
+      labels = rev(labels),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    new_scale_fill() +
+    
+    geom_sf(data=base, aes(fill = breaks2,alpha = breaks2),color=NA) +
+    
+    scale_fill_manual(
+      values = cols2,
+      breaks = rev(breaks_scale2),
+      name = name_var2,
+      drop = FALSE,
+      labels = rev(labels2),
+      na.value = "transparent",
+      guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    scale_alpha_manual(
+      values = c(0,0.2,0.4,0.8,0.8,1,1),
+      guide='none') +
+    
+    geom_sf(data = mask %>% filter(DN != 3), mapping = aes(), fill = "white", color = NA) +
+    
+    #geom_sf(data=equip %>% filter(!is.na(category)),aes(color = category),size=1.2) +
+    
+    geom_sf(data=equip,aes(size = QT_MAT_FUND_AI, color = category)) +
+    
+    scale_color_manual(values = c("#51E18D","#0F572D"),
+                       name = "Schools",
+                       guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    scale_size_continuous(range = c(0,3),
+                          name = "School seats",
+                          guide = guide_legend(
+        #direction = "vertical",
+        keyheight = unit(3, units = "mm"),
+        keywidth = unit(7, units = "mm"),
+        title.position = 'top',
+        #title.hjust = 0.5,
+        #label.hjust = 1,
+        #nrow = 1,
+        #byrow = T,
+        reverse = T,
+        label.position = "right")) +
+    
+    geom_sf(data = mun_city %>% summarise(), mapping = aes(), fill = "transparent", color = "white", size = 0.7) +
+    geom_sf(data = transport, mapping = aes(), color = "#606060", size = 0.5,linetype = "dashed") +
+    coord_sf(xlim=zoom_x,ylim=zoom_y)
+  
+  return(map)
+}
+
+```
+
+```{r census_data}
+
+grid <- st_read("OBT/pr_grid500.shp") %>% st_transform(4326)
+
+# Get census data
+sc_classes <- readRDS("Cities/Curitiba/pr_soc_sc.rds") %>%
+  mutate_all(as.character) %>% mutate_all(as.numeric) %>%
+  mutate_all(.,~(replace_na(.,0))) %>%
+  mutate(hi_wh = white1+white2,
+         md_wh = white3+white4+white5+white6+white7,
+         lo_wh = white8+white9,
+         hi_bl = black1+black2,
+         md_bl = black3+black4+black5+black6+black7,
+         lo_bl = black8+black9,
+         hi_ot = other1+other2,
+         md_ot = other3+other4+other5+other6+other7,
+         lo_ot = other8+other9) %>%
+  filter(substr(CD_GEOCODI,1,7) == "4106902") %>%
+  select(CD_GEOCODI,hi_wh,hi_bl,hi_ot,md_wh,md_bl,md_ot,lo_wh,lo_bl,lo_ot) %>%
+  mutate(CD_GEOCODI=as.character(CD_GEOCODI))
+
+sc_data <- read_csv2("Inputs/Census_Universe/PR/CSV/Pessoa13_PR.csv") %>%
+  filter(substr(Cod_setor,1,7) == "4106902") %>%
+  mutate_all(.,~na_if(.,"X")) %>%
+  mutate_all(as.numeric) %>%
+  mutate(children_EF1 = V040+V041+V042+V043+V044,
+         children_EF2 = V045+V046+V047+V048,
+         young_EM = V049+V050+V051,
+         pop = V001) %>%
+  select(Cod_setor,children_EF1,children_EF2,young_EM,pop) %>%
+  left_join(read_csv2("Inputs/Census_Universe/PR/CSV/Basico_PR.csv",locale=locale(encoding="latin1")) %>%
+              filter(substr(Cod_setor,1,7) == "4106902")  %>%
+              mutate_all(.,~na_if(.,"X")) %>%
+              mutate_all(as.numeric) %>%
+              mutate(income = V009) %>%
+              select(Cod_setor,income),by="Cod_setor") %>%
+  rename(CD_GEOCODI = "Cod_setor") %>%
+  mutate(CD_GEOCODI = as.character(CD_GEOCODI)) %>%
+  left_join(sc_classes,by="CD_GEOCODI")
+
+# Reapportion
+inter <- st_read("OBT/pr_intersection_sc_grid500.shp") %>%
+  st_drop_geometry() %>%
+  left_join(sc_data,by="CD_GEOCODI") %>%
+  group_by(CD_GEOCODI) %>%
+    mutate(area_ct = sum(area)) %>%
+    ungroup() %>%
+    mutate(prop_area = area/area_ct) %>%
+    mutate_at(c("children_EF1","children_EF2","young_EM","pop","hi_wh","hi_bl","hi_ot","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot"),
+              ~(p=.*prop_area)) %>%
+    select(id,pop,income,children_EF1,children_EF2,young_EM,hi_wh,hi_bl,hi_ot,md_wh,md_bl,md_ot,lo_wh,lo_bl,lo_ot) %>%
+    mutate(income = as.numeric(as.character(income))) %>%
+    group_by(id) %>%
+    mutate(income = income*pop) %>%
+    summarise_all(.,~(p=sum(.,na.rm = T))) %>%
+    mutate(income = income/pop)
+
+grid <- grid %>% left_join(inter,by="id")
+grid[is.na(grid)] = 0
+
+grid %>% saveRDS("OBT/pr_grid_data500.rds")
+grid %>% st_write("OBT/pr_grid_data500.shp",delete_layer=T)
+
+grid <- grid %>%
+  mutate(upper = hi_wh+hi_bl+hi_ot,
+         middle = md_wh+md_bl+md_ot,
+         lower = lo_wh+lo_bl+lo_ot) %>%
+  mutate(child_EF1_public = sum(middle+lower)*(children_EF1/sum(upper+middle+lower)),
+         child_EF1_private = sum(upper)*(children_EF1/sum(upper+middle+lower))) %>%
+  mutate(pop_public = sum(middle+lower)*(pop/sum(upper+middle+lower)),
+         pop_private = sum(upper)*(pop/sum(upper+middle+lower))) %>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id)
+
+sum(grid$upper,na.rm=T)/sum(grid$upper+grid$middle+grid$lower,na.rm=T)
+sum(grid$lower,na.rm=T)/sum(grid$upper+grid$middle+grid$lower,na.rm=T)
+sum(grid$middle,na.rm=T)/sum(grid$upper+grid$middle+grid$lower,na.rm=T)
+
+box <- st_bbox(grid)
+cols <- c(rev(brewer.pal(7, "OrRd")))
+cols2 <- c(rev(brewer.pal(7,"BuPu")))
+  
+```
+
+```{r social_maps}
+
+cols <- magma(10)[2:9]
+
+name_var <- "White lower and middle class"
+plot <- PlotMap(grid,grid$md_wh+grid$lo_wh,name_var)
+plot
+ggsave("cwb_wh_md_lo.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+
+name_var <- "Black lower and middle class"
+plot <- PlotMap(grid,grid$md_bl+grid$lo_bl,name_var)
+plot
+ggsave("cwb_bl_md_lo.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+name_var <- "Upper class"
+plot <- PlotMap(grid,grid$hi_wh+grid$hi_bl,name_var)
+plot
+ggsave("cwb_hi.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+name_var <- "Lower class"
+plot <- PlotMap(grid,grid$lo_wh+grid$lo_bl,name_var)
+plot
+ggsave("cwb_lo.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+cols <- c(rev(brewer.pal(7, "OrRd")))
+
+```
+
+```{r matrix_WALK}
+
+#elevat <- get_elev_raster(grid,z=14)
+#writeRaster(elevat,"OBT/CWB/elevation_cwb.tiff")
+
+options(java.parameters = "-Xmx20G")
+Sys.setenv(JAVA_HOME="D:/Program Files/jdk-11")
+
+origin <- grid %>%
+  st_centroid() %>%
+  st_coordinates() %>%
+  as_tibble() %>%
+  cbind(GEO_ID = grid$id) %>%
+  select(GEO_ID,X,Y) %>%
+  mutate(GEO_ID = as.numeric(GEO_ID)) %>%
+  arrange(GEO_ID)
+colnames(origin) <- c("id","lon","lat")
+
+r5r_core <- setup_r5(data_path = "OBT/CWB", verbose = FALSE)
+mode <- c("WALK")
+max_walk_dist <- 100000
+max_trip_duration <- 6*60
+departure_datetime <- as.POSIXct("19-03-2020 07:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+no_access <- NULL
+
+```
+
+```{r schools_WALK}
+
+schools <- read_csv2("OBT/catalogo_escolas_cwb.csv") %>%
+  filter(`Restrição de Atendimento` == "ESCOLA EM FUNCIONAMENTO E SEM RESTRIÇÃO DE ATENDIMENTO") %>%
+  mutate(CO_ENTIDADE = `Código INEP`) %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2022.csv") %>%
+              filter(CO_MUNICIPIO == "4106902") %>%
+              mutate(quality2022 = QT_MAT_FUND_AI/QT_TUR_FUND_AI)%>%
+              select(CO_ENTIDADE,NO_ENTIDADE,QT_MAT_FUND,QT_MAT_FUND_AI,QT_MAT_FUND_AF,QT_MAT_MED,QT_DOC_FUND,QT_DOC_FUND_AI,QT_DOC_FUND_AF,QT_DOC_MED,quality2022),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2019.csv") %>%
+              filter(CO_MUNICIPIO == "4106902") %>%
+              mutate(quality2019 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2019),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2018.csv") %>%
+              filter(CO_MUNICIPIO == "4106902") %>%
+              mutate(quality2018 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2018),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2017.csv") %>%
+              filter(CO_MUNICIPIO == "4106902") %>%
+              mutate(quality2017 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2017),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2016.csv") %>%
+              filter(CO_MUNICIPIO == "4106902") %>%
+              mutate(quality2016 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2016),by="CO_ENTIDADE") %>%
+  left_join(read_csv2("OBT/microdados_ed_basica_2015.csv") %>%
+              filter(CO_MUNICIPIO == "3550308") %>%
+              mutate(quality2015 = QT_MAT_FUND_AI/QT_TUR_FUND_AI) %>%
+              select(CO_ENTIDADE,quality2015),by="CO_ENTIDADE") %>%
+  filter(!is.na(Longitude)) %>%
+  mutate(Longitude = paste0(substr(Longitude,1,3),".",substr(Longitude,4,10)),
+         Latitude = paste0(substr(Latitude,1,3),".",substr(Latitude,4,10))) %>%
+  mutate_at(c("Longitude","Latitude"),as.numeric) 
+schools <- do.call(data.frame,lapply(schools,function(x) replace(x, is.infinite(x), NA)))
+schools[, 30:35] <- na_if(schools[, 30:35], 0) 
+
+schools <- schools %>%
+  filter(Categoria.Administrativa == "Pública") %>%
+  filter(QT_MAT_FUND_AI > 0)
+
+schools$quality <- apply(schools[,30:35], 1, median, na.rm=T)
+
+destination <- schools %>%
+  filter(QT_MAT_FUND_AI > 0) %>%
+  st_as_sf(coords=c("Longitude","Latitude")) %>%
+  st_set_crs(4326)
+
+destination %>%
+  ggplot() +
+  geom_sf(aes(color=QT_MAT_FUND_AI))
+
+destination <- schools %>%
+  ungroup() %>%
+  filter(QT_MAT_FUND_AI > 0) %>%
+  select(CO_ENTIDADE,Longitude,Latitude)
+colnames(destination) <- c("id","lon","lat")
+
+# calculate a travel time matrix
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origin,
+                          destinations = destination,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_dist = max_walk_dist,
+                          max_trip_duration = max_trip_duration,
+                          verbose = FALSE)
+
+head(ttm)
+saveRDS(ttm,"OBT/ttm_pr500_public_schools_EF1.rds")
+ttm <- readRDS("OBT/ttm_pr500_public_schools_EF1.rds")
+
+grid <- grid %>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id)
+destination <- destination %>%
+  left_join(schools %>%
+  ungroup() %>%
+  filter(QT_MAT_FUND_AI > 0) %>%
+  select(CO_ENTIDADE,QT_MAT_FUND_AI),by=c("id"="CO_ENTIDADE"))%>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id) 
+
+# Population (supply)
+  pop <- round(grid$child_EF1_public)
+  row.signs <- rep("<=",length(pop))
+  row.rhs <- round(grid$child_EF1_public)
+  n_pop <- sum(pop)
+  
+  # School openings (demand)
+  jobs <- round(destination$QT_MAT_FUND_AI)
+  col.signs <- rep(">=",length(jobs))
+  col.rhs <- round(destination$QT_MAT_FUND_AI)
+  n_jobs <- sum(jobs)
+  
+  #Fix reapportion issues
+  if(n_jobs > n_pop){
+    aux <- n_pop/n_jobs
+    col.rhs <- col.rhs*aux
+    col.rhs <- diffRound(col.rhs)
+  }
+  
+  matrix <- tibble(fromId = rep(unique(grid$id),length(unique(destination$id))),
+                   toId = rep(unique(destination$id),each=length(unique(grid$id)))) %>%
+    mutate_at(c("fromId","toId"),as.numeric) %>%
+    left_join(ttm %>%
+    mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+    arrange(fromId,toId)
+  matrix[is.na(matrix)] = 100000 
+  
+  matrix <- matrix %>%
+    spread(key="toId",value="travel_time") %>%
+    column_to_rownames("fromId") %>%
+    as.matrix()
+  
+# OBT
+solution <- lp.transport(cost.mat = matrix,
+                         direction = "min",
+                         row.signs = row.signs,
+                         row.rhs = row.rhs,
+                         col.signs = col.signs,
+                         col.rhs = col.rhs)
+solution
+solution %>% saveRDS("OBT/solution_pr500_public_schools_EF1.rds")
+solution <- readRDS("OBT/solution_pr500_public_schools_EF1.rds")
+
+access <- solution$solution %>%
+  as_tibble() 
+colnames(access) <- destination$id
+access <- access %>%
+  mutate(fromId = origin$id) %>%
+  gather(key = "toId",value = "match",-c(fromId)) %>%
+  mutate_at(c("fromId","toId"),as.numeric) 
+
+sum(access$match)
+sum(jobs)
+
+match_schools <- access %>%
+  filter(match > 0) %>%
+  left_join(grid %>% st_drop_geometry(),by=c("fromId"="id")) %>%
+  left_join(schools,by=c("toId"="CO_ENTIDADE")) %>%
+  select("fromId","children_EF1","hi_wh","hi_bl","hi_ot","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot","child_EF1_public","pop_public","toId","QT_MAT_FUND_AI","quality","match")
+
+aux_desag <- access %>%
+  left_join(ttm %>%
+  mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+  ungroup() %>%
+  left_join(schools,by=c("toId"="CO_ENTIDADE")) %>%
+  filter(match > 0)
+
+access <- access %>%
+  left_join(ttm %>%
+  mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+  ungroup() %>%
+  group_by(fromId) %>%
+  summarise(travel_time=stats::weighted.mean(travel_time,match,na.rm=T),
+            match = sum(match,na.rm=T))
+access$travel_time[is.nan(access$travel_time)] <- NA
+
+access <- grid %>%
+  left_join(access,by=c("id"="fromId")) %>%
+  mutate(no_match = round(child_EF1_public)-match,
+         no_match_pct = (round(child_EF1_public)-match)/child_EF1_public) %>%
+  mutate(travel_time_final = travel_time) %>%
+  mutate(travel_time_final = ifelse(no_match > 0.5,5000,travel_time_final))
+  
+  name_var <- "Walking time to\nnearest school"
+  name_var2 <- "Children without\naccess to school"
+  plot <- PlotMap3(access,access$travel_time,name_var,access$no_match,name_var2)
+  plot
+  ggsave("pr_publicschoolsEF1_biv.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  schools <- schools %>%
+  filter(QT_MAT_FUND_AI > 0) %>%
+  st_as_sf(coords=c("Longitude","Latitude")) %>%
+  st_set_crs(4326) %>%
+    mutate(category = ifelse(quality > 30,"> 30 students/class","<= 30 students/class"))
+  
+  name_var <- "Walking time to\nnearest school"
+  name_var2 <- "Children without\naccess to school"
+  zoom_x <- c(-49.36,-49.2)
+  zoom_y <- c(-25.64,-25.5)
+  pos_legend <- c(0.85,0.40)
+  #zoom_x <- c(-46.85,-46.35)
+  #zoom_y <- c(-23.9,-23.4)
+  #pos_legend <- c(0.75,0.25)
+  plot <- PlotMap2(access,access$travel_time,name_var,access$no_match,name_var2,schools %>% filter(!is.na(quality)))
+  plot
+  ggsave("pr_publicschoolsEF1_biv_zoom.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  
+  access_schools <- access %>%
+    select(-c("left","top","right","bottom"))
+  
+  access <- readRDS("OBT/access_publicschoolsEF1_cwb.rds")
+  access_schools %>% saveRDS("OBT/access_publicschoolsEF1_cwb.rds")
+  match_schools %>% saveRDS("OBT/match_publicschoolsEF1_cwb.rds")
+  
+  schools %>% ggplot() +
+  geom_histogram(aes(y=quality))
+  
+  
+  #### Other metrics ####
+  
+# Minimum travel time
+
+others <- ttm %>%
+    group_by(fromId) %>%
+    summarise(min_time = min(travel_time,na.rm=T)) %>%
+    mutate(fromId = as.numeric(fromId))
+  
+others <- ttm %>% mutate(toId = as.numeric(toId)) %>% left_join(destination,by=c("toId"="id")) %>%
+  mutate(cum15 = ifelse(travel_time <= 15,QT_MAT_FUND_AI,0),
+         cum30 = ifelse(travel_time <= 30,QT_MAT_FUND_AI,0)) %>%
+  group_by(fromId) %>%
+  summarise(cum15 = sum(cum15,na.rm=T),
+            cum30 = sum(cum30,na.rm=T))%>%
+  mutate(fromId = as.numeric(fromId)) %>%
+  left_join(others,by="fromId")
+  
+step1 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(destination,by=c("toId"="id")) %>%
+  left_join(grid %>% select(id,child_EF1_public),by=c("fromId"="id")) %>%
+  filter(QT_MAT_FUND_AI >= 1) %>%
+  mutate(step15 = ifelse(travel_time <= 15,child_EF1_public,0),
+         step30 = ifelse(travel_time <= 30,child_EF1_public,0)) %>%
+  group_by(toId) %>%
+  summarise(QT_MAT_FUND_AI = median(QT_MAT_FUND_AI,na.rm=T),
+            step15 = sum(step15,na.rm=T),
+            step30 = sum(step30,na.rm=T)) %>%
+  mutate_at(c("step15","step30"),~(p = QT_MAT_FUND_AI/(.)))
+
+step2 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(grid %>% select(id,child_EF1_public),by=c("fromId"="id")) %>%
+  filter(child_EF1_public >= 1) %>%
+  left_join(step1,by="toId") %>%
+  mutate(step15 = ifelse(travel_time <= 15,step15,0),
+         step30 = ifelse(travel_time <= 30,step30,0)) %>%
+  group_by(fromId) %>%
+  summarise_at(c("step15","step30"),~sum(.,na.rm = T))%>%
+  mutate(fromId = as.numeric(fromId))
+
+others <- others %>%
+  left_join(step2,by="fromId")
+
+others <- readRDS("OBT/access_publicschoolsEF1_cwb.rds") %>%
+  left_join(others,by=c("id"="fromId"))
+
+# Correlation
+corr <- others %>% st_drop_geometry() %>% select(travel_time,min_time,cum15,cum30,step15,step30) %>% mutate_all(as.numeric) %>% na.omit()
+colnames(corr) <- c("urban optimum","minimum time","15-min cum.","30-min cum.","15-min 2SFCA","30-min 2SFCA")
+round(cor(corr %>% mutate_all(scale)), 1)
+ggpairs(corr, title="",upper = list(continuous = wrap('cor', size = 12))) +
+  theme_minimal() +
+  theme(axis.text=element_text(size=18),
+        axis.title=element_text(size=18),
+        strip.text.x = element_text(size = 22),
+        strip.text.y = element_text(size = 22))
+ggsave("pr_publicschools_corr.png",device = "png",path = "OBT/Maps/",dpi = 600,width=20,height = 20)
+
+  name_var <- "Walking time to\nnearest school"
+  plot <- PlotMap(others,others$min_time,name_var)
+  plot
+  ggsave("pr_publicschoolsEF1_mintime.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "School seats\nin 15 minutes"
+  plot <- PlotMap(others,others$cum15,name_var)
+  plot
+  ggsave("pr_publicschoolsEF1_cum15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "School seats\nin 15 minutes"
+  plot <- PlotMap(others,others$step15,name_var)
+  plot
+  ggsave("pr_publicschoolsEF1_step15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+
+```
+
+```{r healthcare_WALK}
+
+ubs <- read_csv("OBT/pr_cnes_profissionais_2021.csv") %>%
+  mutate(CO_CNES = as.numeric(id_estabelecimento_cnes)) %>%
+  filter(atende_sus == "1") %>%
+  #filter(vinculo_contratado_sus == "1") %>%
+  filter(mes == 7) %>%
+  group_by(CO_CNES) %>%
+  summarise(doctors = round(sum(carga_horaria_ambulatorial,na.rm = T)/(36))) %>%
+  ungroup()
+
+#read_csv2("OBT/sp_cnes_estabelecimentos_2023.csv") %>%
+#  filter(IBGE == "355030") %>%
+#  write_csv("OBT/spcapital_cnes_estabelecimentos_2023.csv")
+
+aux <- st_read("OBT/cwb_unidadesbasicassaude.shp") %>% st_transform(4326)
+
+ubs <- aux %>%
+    mutate(long = unlist(map(aux$geometry,1)),
+           lat = unlist(map(aux$geometry,2))) %>%
+  st_drop_geometry() %>%
+  mutate(CNES = as.numeric(CNES)) %>%
+  left_join(ubs,by=c("CNES"="CO_CNES")) %>%
+  filter(doctors > 0) %>%
+  mutate(CO_ENTIDADE = CNES) %>%
+  rename(Longitude = "long",
+         Latitude = "lat") %>%
+  mutate_at(c("Longitude","Latitude"),as.numeric) %>%
+  filter(!is.na(Latitude))
+
+ubs %>% ggplot() +
+  geom_point(aes(x=Longitude,y=Latitude,color=doctors))
+
+ubs <- ubs %>%
+  arrange(CO_ENTIDADE)
+
+destination <- ubs %>%
+  st_as_sf(coords=c("Longitude","Latitude")) %>%
+  st_set_crs(4326)
+
+destination <- ubs %>%
+  ungroup() %>%
+  filter(doctors > 0) %>%
+  select(CO_ENTIDADE,Longitude,Latitude) %>%
+  mutate(CO_ENTIDADE = as.numeric(CO_ENTIDADE)) %>%
+  arrange(CO_ENTIDADE)
+colnames(destination) <- c("id","lon","lat")
+
+# calculate a travel time matrix
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origin,
+                          destinations = destination,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_dist = max_walk_dist,
+                          max_trip_duration = max_trip_duration,
+                          verbose = FALSE)
+
+
+head(ttm)
+saveRDS(ttm,"OBT/ttm_pr500_ubs.rds")
+ttm <- readRDS("OBT/ttm_pr500_ubs.rds")
+
+grid <- grid %>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id)
+destination <- destination %>%
+  left_join(ubs %>%
+  ungroup() %>%
+  filter(doctors > 0) %>%
+  select(CO_ENTIDADE,doctors),by=c("id"="CO_ENTIDADE"))%>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id) %>%
+  mutate(capacity = doctors*1000/3.5)
+
+# Population (supply)
+  pop <- round(grid$pop_public)
+  row.signs <- rep("<=",length(pop))
+  row.rhs <- round(grid$pop_public)
+  n_pop <- sum(pop)
+  
+  # School openings (demand)
+  jobs <- round(destination$capacity)
+  col.signs <- rep(">=",length(jobs))
+  col.rhs <- round(destination$capacity)
+  n_jobs <- sum(jobs)
+  
+  #Fix reapportion issues
+  if(n_jobs > n_pop){
+    aux <- n_pop/n_jobs
+    col.rhs <- col.rhs*aux
+    col.rhs <- diffRound(col.rhs)
+  }
+  
+  matrix <- tibble(fromId = rep(unique(grid$id),length(unique(destination$id))),
+                   toId = rep(unique(destination$id),each=length(unique(grid$id)))) %>%
+    mutate_at(c("fromId","toId"),as.numeric) %>%
+    left_join(ttm %>%
+    mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+    arrange(fromId,toId)
+  matrix[is.na(matrix)] = 100000 
+  
+  matrix <- matrix %>%
+    spread(key="toId",value="travel_time") %>%
+    column_to_rownames("fromId") %>%
+    as.matrix()
+  
+# OBT
+solution <- lp.transport(cost.mat = matrix,
+                         direction = "min",
+                         row.signs = row.signs,
+                         row.rhs = row.rhs,
+                         col.signs = col.signs,
+                         col.rhs = col.rhs)
+solution
+solution %>% saveRDS("OBT/solution_pr500_ubs_35.rds")
+solution <- readRDS("OBT/solution_pr500_ubs_35.rds")
+
+access <- solution$solution %>%
+  as_tibble() 
+colnames(access) <- destination$id
+access <- access %>%
+  mutate(fromId = origin$id) %>%
+  gather(key = "toId",value = "match",-c(fromId)) %>%
+  mutate_at(c("fromId","toId"),as.numeric) 
+
+sum(access$match)
+sum(jobs)
+
+match_ubs <- access %>%
+  filter(match > 0) %>%
+  left_join(grid %>% st_drop_geometry(),by=c("fromId"="id")) %>%
+  left_join(ubs,by=c("toId"="CNES")) %>%
+  select("fromId","hi_wh","hi_bl","hi_ot","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot","pop_public","toId","doctors","match")
+
+access <- access %>%
+  left_join(ttm %>%
+  mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+  ungroup() %>%
+  group_by(fromId) %>%
+  summarise(travel_time=stats::weighted.mean(travel_time,match,na.rm=T),
+            match = sum(match,na.rm=T))
+access$travel_time[is.nan(access$travel_time)] <- NA
+
+access <- grid %>%
+  left_join(access,by=c("id"="fromId")) %>%
+  mutate(no_match = round(pop_public)-match,
+         no_match_pct = (round(pop_public)-match)/pop_public) %>%
+  mutate(travel_time_final = travel_time) %>%
+  mutate(travel_time_final = ifelse(no_match > 0.5,5000,travel_time_final))
+  
+  name_var <- "Walking time to\nnearest healthcare facility"
+  name_var2 <- "People without\naccess to healthcare facility"
+  plot <- PlotMap3(access,access$travel_time,name_var,access$no_match,name_var2)
+  plot
+  ggsave("pr_publicUBS_biv35.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  access_ubs <- access %>%
+    select(-c("left","top","right","bottom","child_EF1_public","child_EF1_private","children_EF1","children_EF2","young_EM"))
+  
+  access <- readRDS("OBT/access_publichealthcare_cwb.rds")
+  access_ubs %>% saveRDS("OBT/access_publichealthcare_cwb.rds")
+  match_ubs %>% saveRDS("OBT/match_publichealthcare_cwb.rds")
+  
+  #### Other metrics ####
+  
+# Minimum travel time
+
+others <- ttm %>%
+    group_by(fromId) %>%
+    summarise(min_time = min(travel_time,na.rm=T)) %>%
+    mutate(fromId = as.numeric(fromId))
+  
+others <- ttm %>% mutate(toId = as.numeric(toId)) %>% left_join(destination,by=c("toId"="id")) %>%
+  mutate(cum15 = ifelse(travel_time <= 15,capacity,0),
+         cum30 = ifelse(travel_time <= 30,capacity,0)) %>%
+  group_by(fromId) %>%
+  summarise(cum15 = sum(cum15,na.rm=T),
+            cum30 = sum(cum30,na.rm=T))%>%
+  mutate(fromId = as.numeric(fromId)) %>%
+  left_join(others,by="fromId")
+  
+step1 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(destination,by=c("toId"="id")) %>%
+  left_join(grid %>% select(id,pop_public),by=c("fromId"="id")) %>%
+  filter(capacity >= 1) %>%
+  mutate(step15 = ifelse(travel_time <= 15,pop_public,0),
+         step30 = ifelse(travel_time <= 30,pop_public,0)) %>%
+  group_by(toId) %>%
+  summarise(capacity = median(capacity,na.rm=T),
+            step15 = sum(step15,na.rm=T),
+            step30 = sum(step30,na.rm=T)) %>%
+  mutate_at(c("step15","step30"),~(p = capacity/(.)))
+
+step2 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(grid %>% select(id,pop_public),by=c("fromId"="id")) %>%
+  filter(pop_public >= 1) %>%
+  left_join(step1,by="toId") %>%
+  mutate(step15 = ifelse(travel_time <= 15,step15,0),
+         step30 = ifelse(travel_time <= 30,step30,0)) %>%
+  group_by(fromId) %>%
+  summarise_at(c("step15","step30"),~sum(.,na.rm = T))%>%
+  mutate(fromId = as.numeric(fromId))
+
+others <- others %>%
+  left_join(step2,by="fromId")
+
+others <- readRDS("OBT/access_publichealthcare_cwb.rds") %>%
+  left_join(others,by=c("id"="fromId"))
+
+# Correlation
+corr <- others %>% st_drop_geometry() %>% select(travel_time,min_time,cum15,cum30,step15,step30) %>% mutate_all(as.numeric) %>% na.omit()
+colnames(corr) <- c("urban optimum","minimum time","15-min cum.","30-min cum.","15-min 2SFCA","30-min 2SFCA")
+round(cor(corr %>% mutate_all(scale)), 1)
+ggpairs(corr, title="",upper = list(continuous = wrap('cor', size = 12))) +
+  theme_minimal() +
+  theme(axis.text=element_text(size=18),
+        axis.title=element_text(size=18),
+        strip.text.x = element_text(size = 22),
+        strip.text.y = element_text(size = 22))
+ggsave("pr_publicubs_corr.png",device = "png",path = "OBT/Maps/",dpi = 600,width=20,height = 20)
+
+  name_var <- "Walking time to\nnearest healthcare facility"
+  plot <- PlotMap(others,others$min_time,name_var)
+  plot
+  ggsave("pr_publicubs_mintime.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "Service capacity\nin 15 minutes"
+  plot <- PlotMap(others,others$cum15,name_var)
+  plot
+  ggsave("pr_publicubs_cum15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "Service capacity\nin 15 minutes"
+  plot <- PlotMap(others,others$step15,name_var)
+  plot
+  ggsave("pr_publicubs_step15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+```
+
+```{r greenspace_WALK}
+
+squares <- st_read("OBT/PRACAS_E_JARDINETES.shp") %>% filter(TIPO != "JARDINETE")
+parks <- st_read("OBT/cwb_PARQUES_E_BOSQUES.shp") 
+
+leaflet() %>%
+  addPolygons(data = parks %>% st_transform(4326),
+              color = "green", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addPolygons(data = squares %>% st_transform(4326),
+              color = "red", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addTiles()
+
+green <- bind_rows(squares,parks) %>%
+  summarise() %>%
+  st_cast("POLYGON") %>%
+  mutate(area = as.numeric(st_area(.)))%>%
+                filter(area >= 100) %>%
+  select(-area)
+
+leaflet() %>%
+  addPolygons(data = green %>% st_transform(4326) ,
+              color = "green", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addTiles()
+
+green <- st_intersection(green,grid %>% st_transform(31982)) %>%
+  mutate(area = st_area(.)) %>%
+  mutate(capacity = as.numeric(area)/4) %>%
+  mutate(newid = row_number()) %>%
+  arrange(newid)
+sum(green$capacity)
+
+#### Greenspace ####
+
+destination <- green %>%
+  st_centroid() %>%
+  st_transform(4326)
+
+destination %>%
+  ggplot() +
+  geom_sf(aes(color=capacity))
+
+destination <- destination %>%
+    mutate(lon = unlist(map(destination$geometry,1)),
+           lat = unlist(map(destination$geometry,2))) %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  select(newid,lon,lat) %>%
+  rename(id = "newid") %>%
+  arrange(id)
+
+# calculate a travel time matrix
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origin,
+                          destinations = destination,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_dist = max_walk_dist,
+                          max_trip_duration = max_trip_duration,
+                          verbose = FALSE)
+
+head(ttm)
+saveRDS(ttm,"OBT/ttm_pr500_green.rds")
+ttm <- readRDS("OBT/ttm_pr500_green.rds")
+
+green <- green %>%
+  st_drop_geometry()
+
+grid <- grid %>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id)
+destination <- destination %>%
+  left_join(green %>%
+  ungroup() %>%
+  select(newid,area,capacity),by=c("id"="newid"))%>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id) 
+
+# Population (supply)
+  pop <- round(grid$pop)
+  row.signs <- rep("<=",length(pop))
+  row.rhs <- round(grid$pop)
+  n_pop <- sum(pop)
+  
+  # School openings (demand)
+  jobs <- round(destination$capacity)
+  col.signs <- rep(">=",length(jobs))
+  col.rhs <- round(destination$capacity)
+  n_jobs <- sum(jobs)
+  
+  #Fix reapportion issues
+  if(n_jobs > n_pop){
+    aux <- n_pop/n_jobs
+    col.rhs <- col.rhs*aux
+    col.rhs <- diffRound(col.rhs)
+  }
+  
+  matrix <- tibble(fromId = rep(unique(grid$id),length(unique(destination$id))),
+                   toId = rep(unique(destination$id),each=length(unique(grid$id)))) %>%
+    mutate_at(c("fromId","toId"),as.numeric) %>%
+    left_join(ttm %>%
+    mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+    arrange(fromId,toId)
+  matrix[is.na(matrix)] = 100000 
+  
+  matrix <- matrix %>%
+    spread(key="toId",value="travel_time") %>%
+    column_to_rownames("fromId") %>%
+    as.matrix()
+  
+# OBT
+solution <- lp.transport(cost.mat = matrix,
+                         direction = "min",
+                         row.signs = row.signs,
+                         row.rhs = row.rhs,
+                         col.signs = col.signs,
+                         col.rhs = col.rhs)
+solution
+solution %>% saveRDS("OBT/solution_pr500_green4.rds")
+solution <- readRDS("OBT/solution_pr500_green4.rds")
+
+access <- solution$solution %>%
+  as_tibble() 
+colnames(access) <- destination$id
+access <- access %>%
+  mutate(fromId = origin$id) %>%
+  gather(key = "toId",value = "match",-c(fromId)) %>%
+  mutate_at(c("fromId","toId"),as.numeric) 
+
+sum(access$match)
+sum(jobs)
+
+match_green <- access %>%
+  filter(match > 0) %>%
+  left_join(grid %>% st_drop_geometry(),by=c("fromId"="id")) %>%
+  left_join(green %>% select(newid,area,capacity),by=c("toId"="newid")) %>%
+  select("fromId","hi_wh","hi_bl","hi_ot","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot","pop_public","toId","area","capacity","match")
+
+access <- access %>%
+  left_join(ttm %>%
+  mutate_at(c("fromId","toId"),as.numeric),by=c("fromId","toId")) %>%
+  ungroup() %>%
+  group_by(fromId) %>%
+  summarise(travel_time=stats::weighted.mean(travel_time,match,na.rm=T),
+            match = sum(match,na.rm=T))
+access$travel_time[is.nan(access$travel_time)] <- NA
+
+access <- grid %>%
+  left_join(access,by=c("id"="fromId")) %>%
+  mutate(no_match = round(pop)-match,
+         no_match_pct = (round(pop)-match)/pop) %>%
+  mutate(travel_time_final = travel_time) %>%
+  mutate(travel_time_final = ifelse(no_match > 0.5,5000,travel_time_final))
+  
+  name_var <- "Walking time to\nnearest greenspace"
+  name_var2 <- "People without\naccess to greenspace"
+  plot <- PlotMap3(access,access$travel_time,name_var,access$no_match,name_var2)
+  plot
+  ggsave("cwb_greenspace4.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  access_green <- access %>%
+    select(-c("left","top","right","bottom","child_EF1_public","child_EF1_private","children_EF1","children_EF2","young_EM"))
+  
+  access <- readRDS("OBT/access_greenspace_cwb.rds")
+  access_green %>% saveRDS("OBT/access_greenspace_cwb.rds")
+  match_green %>% saveRDS("OBT/match_greenspace_cwb.rds")
+  
+  #### Other metrics ####
+  
+# Minimum travel time
+
+others <- ttm %>%
+    group_by(fromId) %>%
+    summarise(min_time = min(travel_time,na.rm=T)) %>%
+    mutate(fromId = as.numeric(fromId))
+  
+others <- ttm %>% mutate(toId = as.numeric(toId)) %>% left_join(destination,by=c("toId"="id")) %>%
+  mutate(cum15 = ifelse(travel_time <= 15,capacity,0),
+         cum30 = ifelse(travel_time <= 30,capacity,0)) %>%
+  group_by(fromId) %>%
+  summarise(cum15 = sum(cum15,na.rm=T),
+            cum30 = sum(cum30,na.rm=T))%>%
+  mutate(fromId = as.numeric(fromId)) %>%
+  left_join(others,by="fromId")
+  
+step1 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(destination,by=c("toId"="id")) %>%
+  left_join(grid %>% select(id,pop),by=c("fromId"="id")) %>%
+  filter(capacity >= 1) %>%
+  mutate(step15 = ifelse(travel_time <= 15,pop,0),
+         step30 = ifelse(travel_time <= 30,pop,0)) %>%
+  group_by(toId) %>%
+  summarise(capacity = median(capacity,na.rm=T),
+            step15 = sum(step15,na.rm=T),
+            step30 = sum(step30,na.rm=T)) %>%
+  mutate_at(c("step15","step30"),~(p = capacity/(.)))
+
+step2 <- ttm %>% mutate(toId = as.numeric(toId),
+                        fromId = as.numeric(fromId)) %>%
+  left_join(grid %>% select(id,pop),by=c("fromId"="id")) %>%
+  filter(pop >= 1) %>%
+  left_join(step1,by="toId") %>%
+  mutate(step15 = ifelse(travel_time <= 15,step15,0),
+         step30 = ifelse(travel_time <= 30,step30,0)) %>%
+  group_by(fromId) %>%
+  summarise_at(c("step15","step30"),~sum(.,na.rm = T))%>%
+  mutate(fromId = as.numeric(fromId))
+
+others <- others %>%
+  left_join(step2,by="fromId")
+
+others <- readRDS("OBT/access_greenspace_cwb.rds") %>%
+  left_join(others,by=c("id"="fromId"))
+
+# Correlation
+corr <- others %>% st_drop_geometry() %>% select(travel_time,min_time,cum15,cum30,step15,step30) %>% mutate_all(as.numeric) %>% na.omit()
+colnames(corr) <- c("urban optimum","minimum time","15-min cum.","30-min cum.","15-min 2SFCA","30-min 2SFCA")
+round(cor(corr %>% mutate_all(scale)), 1)
+ggpairs(corr, title="",upper = list(continuous = wrap('cor', size = 12))) +
+  theme_minimal() +
+  theme(axis.text=element_text(size=18),
+        axis.title=element_text(size=18),
+        strip.text.x = element_text(size = 22),
+        strip.text.y = element_text(size = 22))
+ggsave("pr_greenspace_corr.png",device = "png",path = "OBT/Maps/",dpi = 600,width=20,height = 20)
+
+  name_var <- "Walking time to\nnearest greenspace"
+  plot <- PlotMap(others,others$min_time,name_var)
+  plot
+  ggsave("pr_greenspace_mintime.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "Greenspace (m²)\nin 15 minutes"
+  plot <- PlotMap(others,others$cum15,name_var)
+  plot
+  ggsave("pr_greenspace_cum15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  name_var <- "Greenspace (m²)\nin 15 minutes"
+  plot <- PlotMap(others,others$step15,name_var)
+  plot
+  ggsave("pr_greenspace_step15.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+```
+
+```{r matrix_TRANSIT}
+
+#elevat <- get_elev_raster(grid,z=14)
+#writeRaster(elevat,"OBT/SP/elevation_sp.tiff")
+
+options(java.parameters = "-Xmx20G")
+Sys.setenv(JAVA_HOME="D:/Program Files/jdk-11")
+
+origin <- grid %>%
+  st_centroid() %>%
+  st_coordinates() %>%
+  as_tibble() %>%
+  cbind(GEO_ID = grid$id) %>%
+  select(GEO_ID,X,Y) %>%
+  mutate(GEO_ID = as.numeric(GEO_ID)) %>%
+  arrange(GEO_ID)
+colnames(origin) <- c("id","lon","lat")
+
+r5r_core <- setup_r5(data_path = "OBT/CWB2", verbose = FALSE)
+
+mode <- c("WALK","TRANSIT")
+max_walk_dist <- 100000
+max_trip_duration <- 6*60
+#departure_datetime <- as.POSIXct("10-12-2022 10:00:00",format = "%d-%m-%Y %H:%M:%S")
+departure_datetime <- as.POSIXct("11-05-2019 10:00:00",format = "%d-%m-%Y %H:%M:%S")
+
+box <- st_bbox(grid)
+no_access <- NULL
+
+```
+
+```{r greenspace_TRANSIT}
+
+squares <- st_read("OBT/PRACAS_E_JARDINETES.shp") %>% filter(TIPO != "JARDINETE")
+parks <- st_read("OBT/cwb_PARQUES_E_BOSQUES.shp") 
+
+leaflet() %>%
+  addPolygons(data = parks %>% st_transform(4326),
+              color = "green", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addPolygons(data = squares %>% st_transform(4326),
+              color = "red", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addTiles()
+
+green <- bind_rows(squares,parks) %>%
+  summarise() %>%
+  st_cast("POLYGON") %>%
+  mutate(area = as.numeric(st_area(.)))%>%
+                filter(area >= 100) %>%
+  select(-area)
+
+leaflet() %>%
+  addPolygons(data = green %>% st_transform(4326) ,
+              color = "green", weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5,
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE)) %>%
+  addTiles()
+
+green <- st_intersection(green,grid %>% st_transform(31982)) %>%
+  mutate(area = st_area(.)) %>%
+  mutate(capacity = as.numeric(area)) %>%
+  mutate(newid = row_number()) %>%
+  arrange(newid)
+sum(green$capacity)
+
+destination <- green %>%
+  st_centroid() %>%
+  st_transform(4326)
+
+destination %>%
+  ggplot() +
+  geom_sf(aes(color=capacity))
+
+destination <- destination %>%
+    mutate(lon = unlist(map(destination$geometry,1)),
+           lat = unlist(map(destination$geometry,2))) %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  select(newid,lon,lat) %>%
+  rename(id = "newid") %>%
+  arrange(id)
+
+# calculate a travel time matrix
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origin,
+                          destinations = destination,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_dist = max_walk_dist,
+                          max_trip_duration = max_trip_duration,
+                          verbose = FALSE)
+
+head(ttm)
+saveRDS(ttm,"OBT/ttm_pr500_green_transit.rds")
+ttm <- readRDS("OBT/ttm_pr500_green_transit.rds")
+
+access <- ttm %>%
+  mutate_all(as.numeric) %>%
+  filter(travel_time <= 60) %>%
+  left_join(green %>% select(newid,area,capacity),by=c("toId"="newid")) %>%
+  mutate(time10 = ifelse(travel_time <= 10,capacity,0),
+         time20 = ifelse(travel_time <= 20,capacity,0),
+         time30 = ifelse(travel_time <= 30,capacity,0),
+         time40 = ifelse(travel_time <= 40,capacity,0),
+         time50 = ifelse(travel_time <= 50,capacity,0),
+         time60 = ifelse(travel_time <= 60,capacity,0)) %>%
+  group_by(fromId) %>%
+  summarise(time10 = sum(time10,na.rm=T),
+            time20 = sum(time20,na.rm = T),
+            time30 = sum(time30,na.rm=T),
+            time40 = sum(time40,na.rm=T),
+            time50 = sum(time50,na.rm=T),
+            time60 = sum(time60,na.rm=T))
+
+access <- grid %>%
+  left_join(access,by=c("id"="fromId"))
+
+access <- readRDS("OBT/access_green_transit_cwb.rds")
+
+name_var <- "Greenspace accessible\nwithin 30min. by transit"
+plot <- PlotMap(access,access$time30/sum(access$pop,na.rm=T),name_var)
+plot
+ggsave("pr_green_transit.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+
+  access_green_transit <- access %>%
+    select(-c("left","top","right","bottom","child_EF1_public","child_EF1_private","children_EF1","children_EF2","young_EM"))
+  
+  access_green_transit %>% saveRDS("OBT/access_green_transit_cwb.rds")
+  access_green_transit <- readRDS("OBT/access_green_transit_cwb.rds")
+```
+
+# Quality
+
+```{r quality}
+
+access_schools <- readRDS("OBT/access_publicschoolsEF1.rds") %>%
+  mutate(City = "São Paulo") %>%
+  bind_rows(readRDS("OBT/access_publicschoolsEF1_cwb.rds") %>%
+  mutate(City = "Curitiba"))
+  
+match_schools <- readRDS("OBT/match_publicschoolsEF1.rds") %>%
+  mutate(City = "São Paulo") %>%
+  bind_rows(readRDS("OBT/match_publicschoolsEF1_cwb.rds") %>%
+  mutate(City = "Curitiba"))
+
+access_ubs <- readRDS("OBT/access_publichealthcare.rds") %>%
+  mutate(City = "São Paulo") %>%
+  bind_rows(readRDS("OBT/access_publichealthcare_cwb.rds") %>%
+  mutate(City = "Curitiba"))
+
+match_ubs <- readRDS("OBT/match_publichealthcare.rds") %>%
+  mutate(City = "São Paulo") %>%
+  bind_rows(readRDS("OBT/match_publichealthcare_cwb.rds") %>%
+  mutate(City = "Curitiba"))
+
+access_green <- readRDS("OBT/access_greenspace.rds") %>%
+  mutate(City = "São Paulo") %>%
+  bind_rows(readRDS("OBT/access_greenspace_cwb.rds") %>%
+  mutate(City = "Curitiba"))
+
+match_green <- readRDS("OBT/match_greenspace.rds") %>%
+  mutate(City = "São Paulo") %>%
+  bind_rows(readRDS("OBT/match_greenspace_cwb.rds") %>%
+  mutate(City = "Curitiba"))
+
+access_green_transit <- readRDS("OBT/access_green_transit.rds") %>%
+  mutate(City = "São Paulo") %>%
+  bind_rows(readRDS("OBT/access_green_transit_cwb.rds") %>%
+  mutate(City = "Curitiba"))
+
+
+#### Access by group ####
+
+access_schools %>%
+  st_drop_geometry() %>%
+  mutate_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = (.*child_EF1_public/pop_public)*(no_match/child_EF1_public))) %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p =sum(.,na.rm=T))) %>%
+  bind_rows(access_schools %>%
+  st_drop_geometry() %>%
+  mutate_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = (.*child_EF1_public/pop_public))) %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p =sum(.,na.rm=T)))) %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = min(.)/max(.)))
+
+access_ubs %>%
+  st_drop_geometry() %>%
+  mutate_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = (.)*(no_match/pop_public))) %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p =sum(.,na.rm=T))) %>%
+  bind_rows(access_schools %>%
+  st_drop_geometry() %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p =sum(.,na.rm=T)))) %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = min(.)/max(.)))
+
+access_green %>%
+  st_drop_geometry() %>%
+  mutate_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p = (.)*(no_match/pop))) %>%
+  group_by(City) %>%
+  summarise_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p =sum(.,na.rm=T))) %>%
+  bind_rows(access_schools %>%
+  st_drop_geometry() %>%
+  group_by(City) %>%
+  summarise_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p =sum(.,na.rm=T)))) %>%
+  group_by(City) %>%
+  summarise_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p = min(.)/max(.)))
+
+#### Education ####
+
+access_schools %>%
+  st_drop_geometry() %>%
+  group_by(City) %>%
+  summarise(no_match = sum(no_match,na.rm=T)/sum(child_EF1_public,na.rm=T))
+
+access_schools %>%
+  st_drop_geometry() %>%
+  group_by(City) %>%
+  summarise(time = weightedMean(travel_time,child_EF1_public,na.rm=T))
+
+quality <- read_csv2("OBT/microdados_ed_basica_2022.csv") %>%
+              filter(CO_MUNICIPIO %in%  c("3550308","4106902")) %>%
+              mutate(QT_ALUNOS_PROF = QT_MAT_FUND_AI/QT_TUR_FUND_AI,
+                     QT_SERVICOS = IN_PROF_ADMINISTRATIVOS + IN_PROF_SERVICOS_GERAIS + IN_PROF_BIBLIOTECARIO + IN_PROF_SAUDE + IN_PROF_COORDENADOR + IN_PROF_FONAUDIOLOGO + IN_PROF_NUTRICIONISTA + IN_PROF_PSICOLOGO + IN_PROF_ALIMENTACAO + IN_PROF_PEDAGOGIA + IN_PROF_SECRETARIO + IN_PROF_SEGURANCA + IN_PROF_MONITORES + IN_PROF_GESTAO + IN_PROF_ASSIST_SOCIAL,
+                     QT_PROFISSIONAIS = QT_PROF_ADMINISTRATIVOS + QT_PROF_SERVICOS_GERAIS + QT_PROF_BIBLIOTECARIO + QT_PROF_SAUDE + QT_PROF_COORDENADOR + QT_PROF_FONAUDIOLOGO + QT_PROF_NUTRICIONISTA + QT_PROF_PSICOLOGO + QT_PROF_ALIMENTACAO + QT_PROF_PEDAGOGIA + QT_PROF_SECRETARIO + QT_PROF_SEGURANCA + QT_PROF_MONITORES + QT_PROF_GESTAO + QT_PROF_ASSIST_SOCIAL,
+                     QT_COMPUTADOR = QT_DESKTOP_ALUNO + QT_COMP_PORTATIL_ALUNO + QT_TABLET_ALUNO,
+                     QT_EQUIPAMENTOS = QT_EQUIP_DVD + QT_EQUIP_SOM + QT_EQUIP_TV + QT_EQUIP_LOUSA_DIGITAL + QT_EQUIP_MULTIMIDIA) %>%
+              select(CO_ENTIDADE,QT_ALUNOS_PROF,QT_COMPUTADOR,QT_SALAS_UTILIZADAS,QT_SERVICOS,QT_PROFISSIONAIS,QT_EQUIPAMENTOS) %>%
+  left_join(readRDS("OBT/Education_data_round2.rds") %>%
+              #filter(Cod_Mun %in% c("3550308","4106902")) %>%
+              mutate(Cod_Escola = as.numeric(Cod_Escola)) %>%
+              select(Cod_Escola,IDEB17),by=c("CO_ENTIDADE"="Cod_Escola"))
+
+ match_schools <- match_schools %>%
+   left_join(quality,by=c("toId"="CO_ENTIDADE"))
+ 
+ 
+ aux12 <- NULL
+for(i in c("QT_ALUNOS_PROF","QT_COMPUTADOR","QT_SALAS_UTILIZADAS","QT_SERVICOS","QT_PROFISSIONAIS","QT_EQUIPAMENTOS")){
+q <- match_schools %>%
+  rename(category = i) %>%
+  group_by(toId) %>%
+  mutate(category = ifelse(i == "QT_ALUNOS_PROF",category,category/sum(match,na.rm=T))) %>%
+  ungroup() %>%
+  mutate_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = (.*child_EF1_public/pop_public)*(match/child_EF1_public))) %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = weighted.ttest.ci(category,.))) %>%
+  mutate(dim = i)
+aux12 <- bind_rows(aux12,q)
+}
+
+aux12 <- aux12 %>%
+  mutate(var = rep(c("ci_lo","ci_hi","mean"),nrow(aux12)/6))%>%
+  gather(key="group",value = "pop",-c(dim,var,City)) %>%
+  spread(key="var",value="pop")  %>%
+  mutate(dim = case_when(dim == "QT_ALUNOS_PROF" ~ "Students per teacher",
+                         dim == "QT_COMPUTADOR" ~ "Computers per student",
+                         dim == "QT_SALAS_UTILIZADAS" ~ "Classrooms per student",
+                         dim == "QT_SERVICOS" ~ "Services per student",
+                         dim == "QT_PROFISSIONAIS" ~ "Professionals per student",
+                         dim == "QT_EQUIPAMENTOS" ~ "Pieces of equipment per student")) %>%
+  filter(group %in% c("md_wh","md_bl","lo_wh","lo_bl")) %>%
+  mutate(group = case_when(group == "md_wh" ~ "White\nmiddle class",
+                           group == "md_bl" ~ "Black\nmiddle class",
+                           group == "lo_wh" ~ "White\nlower class",
+                             group == "lo_bl" ~ "Black\nlower class")) %>%
+    mutate(group = factor(group,levels=c("Black\nlower class","White\nlower class","Black\nmiddle class","White\nmiddle class"))) %>%
+  na.omit()
+
+aux12 %>%
+    ggplot(aes(x=group)) +
+    #geom_col(position = "dodge",alpha=0.5) +
+    geom_line(aes(y=mean,group=dim),size=1,color=magma(6)[3]) +
+  geom_errorbar(aes(ymin=ci_lo, ymax=ci_hi),size=0.7, width=.2,color=magma(6)[5]) +
+  #scale_color_manual(values = c(magma(9)[2],magma(9)[4],magma(9)[6],magma(9)[8],"black"),name="Quality") +
+    #scale_fill_manual(values = c(magma(9)[2],magma(9)[4],magma(9)[6],magma(9)[8],"black"),name="Specialties") +
+  #scale_linetype_manual(values = c(rep("solid",4),"dashed"),name="Specialties") +
+  theme_minimal() +
+    theme(
+  plot.background = element_rect(fill = "white",colour = "white")) +
+  theme(legend.position = "bottom") +
+    ylab("") +
+    xlab("") +
+  facet_wrap(~City~dim, scales = "free",ncol = 3)
+
+ggsave("quality_education_graph.png",device = "png",path = "OBT/Maps",dpi = 600,width = 10,height = 10)
+ 
+ 
+
+access_ubs %>%
+  st_drop_geometry() %>%
+  group_by(City) %>%
+  summarise(no_match = sum(no_match,na.rm=T)/sum(pop_public,na.rm=T))
+
+
+aux1 <- match_schools %>%
+  mutate(category = case_when(quality <= 25 ~ "1-25",
+                              quality > 25 & quality <= 28 ~ "26-28",
+                              quality > 28 & quality <= 31 ~ "29-31",
+                              quality > 31 & quality <= 35 ~ "32-35")) %>%
+  mutate(category = factor(category,levels=rev(c("1-25","26-28","29-31","32-35")))) %>%
+  mutate_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = (.*child_EF1_public/pop_public)*(match/child_EF1_public))) %>%
+  group_by(City,category) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.,na.rm=T))) %>%
+  gather(key="group",value = "people",-c(City,category)) %>%
+  left_join(access_schools %>%
+              st_drop_geometry() %>%
+              group_by(City) %>%
+              summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.*child_EF1_public/pop_public,na.rm=T))) %>%
+              gather(key="group",value = "total",-c(City)),by=c("City","group")) %>%
+  mutate(pct = people/total) %>%
+  select(-c(people,total))
+
+aux2 <- access_schools %>%
+  st_drop_geometry() %>%
+  mutate_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = (.*child_EF1_public/pop_public)*(no_match/child_EF1_public))) %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.,na.rm=T))) %>%
+  mutate(var = "no_access") %>%
+  bind_rows(access_schools %>%
+              st_drop_geometry() %>%
+              group_by(City) %>%
+              summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.*child_EF1_public/pop_public,na.rm=T))) %>%
+              mutate(var = "total")) %>%
+  gather(key="group",value = "people",-c(City,var)) %>%
+  group_by(City,group) %>%
+  summarise(pct = min(people)/max(people)) %>%
+  mutate(category = "No access")
+
+bind_rows(aux1,aux2) %>%
+  filter(group %in% c("md_wh","md_bl","lo_wh","lo_bl")) %>%
+  mutate(group = case_when(group == "md_wh" ~ "White\nmiddle class",
+                           group == "md_bl" ~ "Black\nmiddle class",
+                           group == "lo_wh" ~ "White\nlower class",
+                             group == "lo_bl" ~ "Black\nlower class")) %>%
+    mutate(group = factor(group,levels=c("Black\nlower class","White\nlower class","Black\nmiddle class","White\nmiddle class"))) %>%
+  na.omit() %>%
+  
+    ggplot(aes(x=group,y=100*pct,fill=category)) +
+    #geom_col(position = "dodge",alpha=0.5) +
+    geom_line(aes(group=category,color=category,linetype=category),size=1) +
+  scale_color_manual(values = c(magma(9)[2],magma(9)[4],magma(9)[6],magma(9)[8],"black"),name="Students\nper class") +
+    scale_fill_manual(values = c(magma(9)[2],magma(9)[4],magma(9)[6],magma(9)[8],"black"),name="Students\nper class") +
+  scale_linetype_manual(values = c(rep("solid",4),"dashed"),name="Students\nper class") +
+  theme_minimal() +
+    theme(
+  plot.background = element_rect(fill = "white",colour = "white")) +
+  theme(legend.position = "bottom") +
+    ylab("") +
+    xlab("") +
+  facet_wrap(~City)
+
+ggsave("quality_schools_graph.png",device = "png",path = "OBT/Maps",dpi = 600,width = 4,height = 3)
+
+
+
+#### Healthcare ####
+
+match_ubs <- match_ubs %>%
+  left_join(st_read("OBT/Health_Data_211019.shp") %>% st_drop_geometry(),
+            by=c("toId"="CO_CNES"))
+
+access_ubs %>%
+  st_drop_geometry() %>%
+  group_by(City) %>%
+  summarise(no_match = sum(no_match,na.rm=T)/sum(pop_public,na.rm=T))
+
+aux12 <- NULL
+for(i in c("Num_Eqp","Nm_Srvc","Nm_Inst","Hrs_n_W","Num_tms","Nm_Ef_E")){
+q <- match_ubs %>%
+  select(-category) %>%
+  rename(category = i) %>%
+  group_by(toId) %>%
+  mutate(category = ifelse(i == "Hrs_n_W",category,category/sum(match,na.rm=T))) %>%
+  ungroup() %>%
+  mutate_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = .*(match/pop_public))) %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = weighted.ttest.ci(category,.))) %>%
+  mutate(dim = i)
+aux12 <- bind_rows(aux12,q)
+}
+
+aux12 <- aux12 %>%
+  mutate(var = rep(c("ci_lo","ci_hi","mean"),nrow(aux12)/6))%>%
+  gather(key="group",value = "pop",-c(dim,var,City)) %>%
+  spread(key="var",value="pop")  %>%
+  mutate(dim = case_when(dim == "Hrs_n_W" ~ "Number of open hours",
+                         dim == "Nm_Ef_E" ~ "Professionals per person",
+                         dim == "Nm_Inst" ~ "Installations per person",
+                         dim == "Nm_Srvc" ~ "Services per person",
+                         dim == "Num_Eqp" ~ "Pieces of equipment per person",
+                         dim == "Num_tms" ~ "Teams per person")) %>%
+  filter(group %in% c("md_wh","md_bl","lo_wh","lo_bl")) %>%
+  mutate(group = case_when(group == "md_wh" ~ "White\nmiddle class",
+                           group == "md_bl" ~ "Black\nmiddle class",
+                           group == "lo_wh" ~ "White\nlower class",
+                             group == "lo_bl" ~ "Black\nlower class")) %>%
+    mutate(group = factor(group,levels=c("Black\nlower class","White\nlower class","Black\nmiddle class","White\nmiddle class"))) %>%
+  na.omit()
+
+aux12 %>%
+    ggplot(aes(x=group)) +
+    #geom_col(position = "dodge",alpha=0.5) +
+    geom_line(aes(y=mean,group=dim),size=1,color=magma(6)[3]) +
+  geom_errorbar(aes(ymin=ci_lo, ymax=ci_hi),size=0.7, width=.2,color=magma(6)[5]) +
+  #scale_color_manual(values = c(magma(9)[2],magma(9)[4],magma(9)[6],magma(9)[8],"black"),name="Quality") +
+    #scale_fill_manual(values = c(magma(9)[2],magma(9)[4],magma(9)[6],magma(9)[8],"black"),name="Specialties") +
+  #scale_linetype_manual(values = c(rep("solid",4),"dashed"),name="Specialties") +
+  theme_minimal() +
+    theme(
+  plot.background = element_rect(fill = "white",colour = "white")) +
+  theme(legend.position = "bottom") +
+    ylab("") +
+    xlab("") +
+  facet_wrap(~City~dim, scales = "free",ncol = 3)
+
+ggsave("quality_health_graph.png",device = "png",path = "OBT/Maps",dpi = 600,width = 10,height = 10)
+
+match_ubs <- match_ubs %>%
+  mutate(Num_Eqp = cut(Num_Eqp,breaks =c(1,9,14,18,71),labels=c(1,2,3,4)),
+         Nm_Srvc = cut(Nm_Srvc,breaks =c(1,3,4,5,8),labels=c(1,2,3,4)),
+         Nm_Inst = cut(Nm_Inst,breaks =c(1,9,12,17,55),labels=c(1,2,3,4)),
+         Hrs_n_W = cut(Hrs_n_W,breaks =c(45,50,60,65,84),labels=c(1,2,3,4)),
+         Num_tms = cut(Num_tms,breaks =c(1,2,4,6,13),labels=c(1,2,3,4)),
+         Nm_Ef_E = cut(Nm_Ef_E,breaks =c(3,20,33,56,123),labels=c(1,2,3,4))) 
+
+aux2 <- access_ubs %>%
+  st_drop_geometry() %>%
+  mutate_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = .*(no_match/pop_public))) %>%
+  group_by(City) %>%
+  summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.,na.rm=T))) %>%
+  mutate(var = "no_access") %>%
+  bind_rows(access_ubs %>%
+              st_drop_geometry() %>%
+              group_by(City) %>%
+              summarise_at(c("md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.,na.rm=T))) %>%
+              mutate(var = "total")) %>%
+  gather(key="group",value = "people",-c(City,var)) %>%
+  group_by(City,group) %>%
+  summarise(pct = min(people)/max(people)) %>%
+  mutate(dim = "No access")
+
+#### Greenspace ####
+
+access_green %>%
+  st_drop_geometry() %>%
+  group_by(City) %>%
+  summarise(no_match = sum(no_match,na.rm=T)/sum(pop,na.rm=T))
+
+aux0 <- access_green %>%
+    st_drop_geometry() %>%
+  group_by(City) %>%
+    summarise_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p = weightedMean(travel_time,.,na.rm=T))) %>%
+  gather(key="group",value="time",-c(City))
+
+aux1 <- access_green %>%
+  st_drop_geometry() %>%
+  mutate(category = case_when(travel_time <= 10 ~ "0-10",
+                                travel_time > 10 & travel_time <= 20 ~ "10-20",
+                                travel_time > 20 & travel_time <= 30 ~ "20-30",
+                                travel_time > 30 & travel_time <= 100 ~ "> 30")) %>%
+  mutate_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p = .*(match/pop_public))) %>%
+  group_by(City,category) %>%
+  summarise_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.,na.rm=T))) %>%
+  gather(key="group",value = "people",-c(City,category)) %>%
+  left_join(access_green %>%
+              st_drop_geometry() %>%
+              group_by(City) %>%
+              summarise_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.,na.rm=T))) %>%
+              gather(key="group",value = "total",-c(City)),by=c("City","group")) %>%
+  mutate(pct = people/total) %>%
+  select(-c(people,total))
+
+aux2 <- access_green %>%
+  st_drop_geometry() %>%
+  mutate_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p = .*(no_match/pop))) %>%
+  group_by(City) %>%
+  summarise_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.,na.rm=T))) %>%
+  mutate(var = "no_access") %>%
+  bind_rows(access_green %>%
+              st_drop_geometry() %>%
+              group_by(City) %>%
+              summarise_at(c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl"),~(p = sum(.,na.rm=T))) %>%
+              mutate(var = "total")) %>%
+  gather(key="group",value = "people",-c(City,var)) %>%
+  group_by(City,group) %>%
+  summarise(pct = min(people)/max(people)) %>%
+  mutate(category = "No access")
+
+bind_rows(aux1,aux2) %>%
+ mutate(group = case_when(group == "hi_wh" ~ "White\nupper class",
+                           group == "hi_bl" ~ "Black\nupper class",
+                           group == "md_wh" ~ "White\nmiddle class",
+                           group == "md_bl" ~ "Black\nmiddle class",
+                           group == "lo_wh" ~ "White\nlower class",
+                           group == "lo_bl" ~ "Black\nlower class")) %>%
+  mutate(group = factor(group,levels=c("Black\nlower class","White\nlower class","Black\nmiddle class","White\nmiddle class","Black\nupper class","White\nupper class"))) %>%
+    mutate(category = factor(category,levels=c("0-10","10-20","20-30","> 30","No access"))) %>%
+  mutate(City = factor(City,levels=c("São Paulo","Curitiba"))) %>%
+  na.omit() %>%
+  
+    ggplot(aes(x=group,y=100*pct,fill=category)) +
+    #geom_col(position = "dodge",alpha=0.5) +
+    geom_line(aes(group=category,color=category,linetype=category),size=1) +
+  scale_color_manual(values = c((brewer.pal(4, "OrRd")),"black"),name="Walking time") +
+    scale_fill_manual(values = c((brewer.pal(4, "OrRd")),"black"),name="Walking time") +
+  scale_linetype_manual(values = c(rep("solid",4),"dashed"),name="Walking time") +
+  theme_minimal() +
+    theme(
+  plot.background = element_rect(fill = "white",colour = "white")) +
+  theme(legend.position = "bottom") +
+    ylab("") +
+    xlab("") +
+  facet_wrap(~City)
+
+ggsave("walk_green_graph.png",device = "png",path = "OBT/Maps",dpi = 600,width = 9.5,height = 4)
+
+
+
+aux <- aux0 %>% left_join(aux2,by=c("City","group")) %>%
+  filter(group %in% c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl")) %>%
+  mutate(group = case_when(group == "hi_wh" ~ "White\nupper class",
+                           group == "hi_bl" ~ "Black\nupper class",
+                           group == "md_wh" ~ "White\nmiddle class",
+                           group == "md_bl" ~ "Black\nmiddle class",
+                           group == "lo_wh" ~ "White\nlower class",
+                           group == "lo_bl" ~ "Black\nlower class")) %>%
+  mutate(group = factor(group,levels=c("Black\nlower class","White\nlower class","Black\nmiddle class","White\nmiddle class","Black\nupper class","White\nupper class"))) 
+
+# Value used to transform the data
+coeff <- 1
+
+aux %>% ggplot(aes(x=group)) +
+  geom_bar(aes(y=100*pct),stat="identity", size=.1, fill=magma(9)[7], alpha=.7) + 
+  geom_line(aes(y=time/coeff,group=City), size=2, color=magma(9)[3]) +
+  scale_y_continuous(
+    name = "Population group without access (%)",
+    sec.axis = sec_axis(~.*coeff, name="Walking time (min)")) + 
+  theme_ipsum() +
+  theme(
+    axis.title.y = element_text(color = magma(9)[7]),
+    axis.title.y.right = element_text(color = magma(9)[3])) +
+  xlab("") +
+  facet_wrap(~City)
+ggsave("walk_green_graph.png",device = "png",path = "OBT/Maps",dpi = 600,width = 8,height = 5)
+
+
+aux3 <- access_green_transit %>%
+    st_drop_geometry() %>%
+    summarise_at(c("hi_wh","hi_ot","hi_bl","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot"),~(p = weightedMean(time40,.,na.rm=T))) %>%
+  gather(key="group",value="time40")  %>%
+  left_join(access_green_transit %>%
+    st_drop_geometry() %>%
+    summarise_at(c("hi_wh","hi_ot","hi_bl","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot"),~(p = weightedMean(time50,.,na.rm=T))) %>%
+  gather(key="group",value="time50"),by="group")  %>%
+  left_join(access_green_transit %>%
+    st_drop_geometry() %>%
+    summarise_at(c("hi_wh","hi_ot","hi_bl","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot"),~(p = weightedMean(time30,.,na.rm=T))) %>%
+  gather(key="group",value="time30"),by="group") %>%
+  left_join(access_green_transit %>%
+    st_drop_geometry() %>%
+    summarise_at(c("hi_wh","hi_ot","hi_bl","md_wh","md_bl","md_ot","lo_wh","lo_bl","lo_ot"),~(p = weightedMean(time60,.,na.rm=T))) %>%
+  gather(key="group",value="time60"),by="group") %>%
+  gather(key="time",value="access",-c(group))%>%
+  filter(group %in% c("hi_wh","hi_bl","md_wh","md_bl","lo_wh","lo_bl")) %>%
+  mutate(group = case_when(group == "hi_wh" ~ "White\nupper class",
+                           group == "hi_bl" ~ "Black\nupper class",
+                           group == "md_wh" ~ "White\nmiddle class",
+                           group == "md_bl" ~ "Black\nmiddle class",
+                           group == "lo_wh" ~ "White\nlower class",
+                           group == "lo_bl" ~ "Black\nlower class")) %>%
+  mutate(group = factor(group,levels=c("Black\nlower class","White\nlower class","Black\nmiddle class","White\nmiddle class","Black\nupper class","White\nupper class"))) %>%
+  mutate(time = paste0(gsub("time","",time)," min"))
+
+
+aux3 %>% ggplot(aes(x=group)) +
+  geom_line(aes(y=access/1000,group=time,color=time), size=2) +
+  scale_color_manual(values = c(magma(9)[2],magma(9)[4],magma(9)[6],magma(9)[8]),name="Threshold time") +
+  theme_ipsum() +
+  xlab("") +
+  ylab("Greenspace (x 1,000m²)") +
+  theme(legend.position = "bottom")
+  
+ggsave("transit_green_graph.png",device = "png",path = "OBT/Maps",dpi = 600,width = 8,height = 5)
+
+
+```
+
+```{r lisa_map_priority}
+
+grid <- st_read("OBT/sp_grid_data500.shp") 
+
+aux <- od %>%
+  filter(F_PESS == 1) %>%
+  filter(QT_AUTO == 0) %>%
+  group_by(CO_DOM_X,CO_DOM_Y,categoria) %>%
+  summarise(n_pessoas = sum(FE_PESS)) %>%
+  st_as_sf(coords = c("CO_DOM_X","CO_DOM_Y")) %>%
+  st_set_crs(31983) %>%
+  st_transform(4326) 
+
+aux <- aux %>%
+  st_join(grid %>% select(id),join = st_intersects) %>%
+  st_drop_geometry() %>%
+  group_by(id,categoria) %>%
+  summarise(n_pessoas = sum(n_pessoas)) %>%
+  spread(key="categoria",value="n_pessoas") %>%
+  mutate_all(~replace_na(.,0))
+  
+aux <- grid %>%
+  left_join(aux,by="id")%>%
+  mutate_at(c("Men","Men with child","Men with elderly","Women","Women with child","Women with elderly"),~replace_na(.,0)) %>%
+  mutate(women_child_elderly = `Women with child`+`Women with elderly`)
+
+aux %>%
+  ggplot() +
+  geom_sf(aes(fill=women_elderly+mothers),color="transparent")
+
+  name_var <- "Women with child or elderly\nwithout a car"
+  plot <- PlotMap(aux,aux$women_elderly+aux$mothers,name_var)
+  plot
+  ggsave("sp_women_child_elderly.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+
+nb <- poly2nb(grid)
+lw <- nb2listw(nb, style = "B", zero.policy = T)
+W  <- as(lw, "symmetricMatrix")
+W  <- as.matrix(W/rowSums(W))
+W[which(is.na(W))] <- 0
+
+#### Primary schools ####
+
+access_schools <- readRDS("OBT/access_publicschoolsEF1.rds") %>%
+  left_join(aux %>%
+              st_drop_geometry() %>%
+              select("id","Men","Men with child","Men with elderly","Women","Women with child","Women with elderly","women_child_elderly"),by="id")
+
+
+# Variables to use in the correlation: white and black population in each census track
+x <- access_schools$women_child_elderly
+y <- access_schools$no_match
+
+#======================================================
+# Calculating the index and its simulated distribution
+# for global and local values
+
+m   <- moran_I(x, y, W)
+m[[1]] # global value
+
+m_i <- m[[2]]  # local values
+
+local_sims <- simula_moran(x, y, W)$local_sims
+
+# Identifying the significant values 
+alpha <- .05  # for a 95% confidence interval
+probs <- c(alpha/2, 1-alpha/2)
+intervals <- t( apply(local_sims, 1, function(x) quantile(x, probs=probs)))
+sig        <- ( m_i < intervals[,1] )  | ( m_i > intervals[,2] )
+
+#======================================================
+# Preparing for plotting
+
+access_schools$sig <- sig
+
+# Identifying the LISA patterns
+xp <- (x-mean(x))/sd(x)
+yp <- (y-mean(y))/sd(y)
+
+patterns <- as.character( interaction(xp > 0, W%*%yp > 0) ) 
+patterns <- patterns %>% 
+        str_replace_all("TRUE","High") %>% 
+        str_replace_all("FALSE","Low")
+patterns[access_schools$sig==0] <- "Not significant"
+access_schools$patterns <- patterns
+
+  name_var <- "Lisa map\nPrimary schools"
+  plot <- PlotMap_lisa(access_schools,access_schools$patterns,name_var)
+  plot
+  ggsave("sp_lisa_schoolsEF1.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+#### Healthcare facilities ####
+access_ubs <- readRDS("OBT/access_publichealthcare.rds") %>%
+  left_join(aux %>%
+              st_drop_geometry() %>%
+              select("id","Men","Men with child","Men with elderly","Women","Women with child","Women with elderly","women_child_elderly"),by="id")
+
+
+# Variables to use in the correlation: white and black population in each census track
+x <- access_ubs$women_child_elderly
+y <- access_ubs$no_match
+
+#======================================================
+# Calculating the index and its simulated distribution
+# for global and local values
+
+m   <- moran_I(x, y, W)
+m[[1]] # global value
+
+m_i <- m[[2]]  # local values
+
+local_sims <- simula_moran(x, y, W)$local_sims
+
+# Identifying the significant values 
+alpha <- .05  # for a 95% confidence interval
+probs <- c(alpha/2, 1-alpha/2)
+intervals <- t( apply(local_sims, 1, function(x) quantile(x, probs=probs)))
+sig        <- ( m_i < intervals[,1] )  | ( m_i > intervals[,2] )
+
+#======================================================
+# Preparing for plotting
+
+access_ubs$sig <- sig
+
+# Identifying the LISA patterns
+xp <- (x-mean(x))/sd(x)
+yp <- (y-mean(y))/sd(y)
+
+patterns <- as.character( interaction(xp > 0, W%*%yp > 0) ) 
+patterns <- patterns %>% 
+        str_replace_all("TRUE","High") %>% 
+        str_replace_all("FALSE","Low")
+patterns[access_ubs$sig==0] <- "Not significant"
+access_ubs$patterns <- patterns
+
+  name_var <- "Lisa map\nHealthcare facilities"
+  plot <- PlotMap_lisa(access_ubs,access_ubs$patterns,name_var)
+  plot
+  ggsave("sp_lisa_healthcare.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+  
+#### Greenspace ####
+  
+access_green <- readRDS("OBT/access_greenspace.rds") %>%
+  left_join(aux %>%
+              st_drop_geometry() %>%
+              select("id","Men","Men with child","Men with elderly","Women","Women with child","Women with elderly","women_child_elderly"),by="id")
+
+
+# Variables to use in the correlation: white and black population in each census track
+x <- access_green$women_child_elderly
+y <- access_green$no_match
+
+#======================================================
+# Calculating the index and its simulated distribution
+# for global and local values
+
+m   <- moran_I(x, y, W)
+m[[1]] # global value
+
+m_i <- m[[2]]  # local values
+
+local_sims <- simula_moran(x, y, W)$local_sims
+
+# Identifying the significant values 
+alpha <- .05  # for a 95% confidence interval
+probs <- c(alpha/2, 1-alpha/2)
+intervals <- t( apply(local_sims, 1, function(x) quantile(x, probs=probs)))
+sig        <- ( m_i < intervals[,1] )  | ( m_i > intervals[,2] )
+
+#======================================================
+# Preparing for plotting
+
+access_green$sig <- sig
+
+# Identifying the LISA patterns
+xp <- (x-mean(x))/sd(x)
+yp <- (y-mean(y))/sd(y)
+
+patterns <- as.character( interaction(xp > 0, W%*%yp > 0) ) 
+patterns <- patterns %>% 
+        str_replace_all("TRUE","High") %>% 
+        str_replace_all("FALSE","Low")
+patterns[access_green$sig==0] <- "Not significant"
+access_green$patterns <- patterns
+
+  name_var <- "Lisa map\nGreenspaces"
+  plot <- PlotMap_lisa(access_green,access_green$patterns,name_var)
+  plot
+  ggsave("sp_lisa_greenspaces.png",plot,device = "png",path = "OBT/Maps/",dpi = 600,width=7,height = 7)
+  
+
+```
